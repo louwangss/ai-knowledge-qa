@@ -96,3 +96,15 @@ class SemanticMemory(Base):
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="semantic_memories")
+
+
+class SessionSummary(Base):
+    """会话级摘要持久化（与 sessions 一对一）"""
+    __tablename__ = "session_summary"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(String(36), ForeignKey("sessions.id"), nullable=False, unique=True)
+    summary = Column(Text, nullable=False)
+    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    session = relationship("Session", backref="summary_record")

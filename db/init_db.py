@@ -18,6 +18,7 @@ INDEX_SQL = [
     "CREATE INDEX idx_semantic_user ON semantic_memory(user_id)",
     "CREATE UNIQUE INDEX idx_doc_hash ON documents(user_id, content_hash)",
     "CREATE INDEX idx_session_user ON sessions(user_id, status, last_active)",
+    "CREATE UNIQUE INDEX idx_session_summary ON session_summary(session_id)",
 ]
 
 
