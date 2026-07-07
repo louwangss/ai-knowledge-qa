@@ -59,3 +59,37 @@ def test_loader_pdf_uses_pymupdf():
     """pdf 使用 PyMuPDFLoader"""
     from langchain_community.document_loaders import PyMuPDFLoader
     assert LOADERS[".pdf"] == PyMuPDFLoader
+
+
+# ---- 相关度阈值过滤 ----
+
+from memory.retrieve import _filter_by_relevance
+
+
+def test_filter_by_relevance_keeps_above_threshold():
+    """相关度 >= 阈值的文档保留"""
+    docs = [
+        {"content": "相关文档A", "metadata": {}, "score": 0.8},
+        {"content": "相关文档B", "metadata": {}, "score": 0.5},
+        {"content": "不相关文档", "metadata": {}, "score": 0.3},
+    ]
+    result = _filter_by_relevance(docs, threshold=0.5)
+    assert len(result) == 2
+    assert result[0]["content"] == "相关文档A"
+    assert result[1]["content"] == "相关文档B"
+
+
+def test_filter_by_relevance_empty_input():
+    """空列表返回空列表"""
+    result = _filter_by_relevance([], threshold=0.5)
+    assert result == []
+
+
+def test_filter_by_relevance_all_filtered():
+    """全部低于阈值时返回空列表"""
+    docs = [
+        {"content": "文档1", "metadata": {}, "score": 0.1},
+        {"content": "文档2", "metadata": {}, "score": 0.2},
+    ]
+    result = _filter_by_relevance(docs, threshold=0.5)
+    assert result == []

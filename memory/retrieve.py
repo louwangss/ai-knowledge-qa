@@ -35,6 +35,11 @@ def _sync_chroma_search(
     ]
 
 
+def _filter_by_relevance(docs: list[dict], threshold: float) -> list[dict]:
+    """过滤掉相关度低于阈值的文档"""
+    return [d for d in docs if d.get("score", 0) >= threshold]
+
+
 async def retrieve_context(
     user_id: str,
     session_id: str,
@@ -75,6 +80,11 @@ async def retrieve_context(
             get_short_term(r, user_id, session_id, db),
         )
         doc_results = []
+
+    from config import RAG_RELEVANCE_THRESHOLD
+
+    # 过滤低相关度文档
+    doc_results = _filter_by_relevance(doc_results, RAG_RELEVANCE_THRESHOLD)
 
     return {
         "documents": doc_results,

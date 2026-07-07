@@ -42,3 +42,6 @@ EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 # --- LLM ---
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+
+# --- RAG 检索 ---
+RAG_RELEVANCE_THRESHOLD = float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0.5"))
