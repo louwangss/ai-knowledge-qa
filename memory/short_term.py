@@ -117,7 +117,7 @@ def get_short_term_memory(r: redis.Redis, user_id: str, session_id: str, db_sess
         {"summary": str|None, "messages": list[dict]}
     """
     summary = get_summary(r, user_id, session_id)
-    messages = get_messages(r, user_id, session_id, count=10)
+    messages = get_messages(r, user_id, session_id, count=-1)
 
     # Redis miss（过期/新会话）→ 从 MySQL 恢复
     if not messages and db_session:
@@ -141,7 +141,7 @@ def _load_summary_from_mysql(db_session, session_id: str) -> str | None:
 
 
 def _load_from_mysql(db_session, user_id: str, session_id: str) -> list[dict]:
-    """从 MySQL 加载当前会话最近 5 轮对话"""
+    """从 MySQL 加载当前会话全部对话（Redis miss 恢复用）"""
     from db.models import ChatHistory
     from sqlalchemy import select
 
@@ -149,11 +149,9 @@ def _load_from_mysql(db_session, user_id: str, session_id: str) -> list[dict]:
         select(ChatHistory)
         .where(ChatHistory.user_id == user_id)
         .where(ChatHistory.session_id == session_id)
-        .order_by(ChatHistory.created_at.desc())
-        .limit(10)
+        .order_by(ChatHistory.created_at.asc())
     )
     rows = db_session.execute(stmt).scalars().all()
-    rows = list(reversed(rows))  # 正序
     return [{"role": row.role, "content": row.content} for row in rows]
 
 

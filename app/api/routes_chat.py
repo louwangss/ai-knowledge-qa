@@ -60,8 +60,13 @@ def _format_short_term(stm: dict) -> str:
     if stm.get("summary"):
         parts.append(f"[早期对话摘要]\n{stm['summary']}")
     if stm.get("messages"):
-        recent = [f"[{i+1}] {m['role']}: {m['content']}" for i, m in enumerate(stm["messages"])]
-        parts.append("[最近对话]\n" + "\n".join(recent))
+        msgs = stm["messages"]
+        has_summary = bool(stm.get("summary"))
+        if has_summary:
+            recent = [f"[早期对话之后第{i+1}条] {m['role']}: {m['content'][:100]}" for i, m in enumerate(msgs)]
+        else:
+            recent = [f"[第{i+1}条] {m['role']}: {m['content'][:100]}" for i, m in enumerate(msgs)]
+        parts.append("[对话记录]\n" + "\n".join(recent))
     return "\n\n".join(parts) if parts else "无"
 
 
@@ -121,7 +126,7 @@ NORMAL_PROMPT = """你是一个知识库问答助手。请根据以下上下文�
 # 学习历程
 {episodic}
 
-# 对话上下文（[N] 为对话序号，序号最小的是最早的消息）
+# 对话上下文（[第N条] 为整个会话的对话顺序，编号最小的是最早的消息；若有早期对话摘要，则编号从摘要之后开始）
 {short_term}
 
 # 用户的问题
