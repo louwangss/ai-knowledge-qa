@@ -124,9 +124,20 @@ def get_short_term_memory(r: redis.Redis, user_id: str, session_id: str, db_sess
         messages = _load_from_mysql(db_session, user_id, session_id)
         if messages:
             init_session(r, user_id, session_id, db_messages=messages)
-            summary = None  # 新 session 不继承旧摘要
+        # 从 MySQL 恢复 summary（无论 messages 是否存在）
+        summary = _load_summary_from_mysql(db_session, session_id)
 
     return {"summary": summary, "messages": messages}
+
+
+def _load_summary_from_mysql(db_session, session_id: str) -> str | None:
+    """从 MySQL session_summary 表读取持久化的摘要"""
+    from db.models import SessionSummary
+
+    record = db_session.query(SessionSummary).filter(
+        SessionSummary.session_id == session_id,
+    ).first()
+    return record.summary if record else None
 
 
 def _load_from_mysql(db_session, user_id: str, session_id: str) -> list[dict]:

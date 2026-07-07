@@ -132,3 +132,48 @@ def test_do_compress_updates_existing_summary():
     assert not db_session.add.called, "已有记录时应更新而非 add"
     assert db_session.commit.called
     assert "新摘要" in existing_record.summary
+
+
+from memory.short_term import get_short_term_memory
+
+
+def test_get_short_term_memory_restores_summary_from_mysql():
+    """Redis miss 时应从 MySQL session_summary 表恢复 summary"""
+    from db.models import SessionSummary
+
+    r = MagicMock()
+    # Redis 全部 miss
+    r.get.return_value = None
+    r.lrange.return_value = []
+
+    # mock db_session
+    db_session = MagicMock()
+
+    # mock _load_from_mysql 返回空列表（触发 init_session 但 summary 单独恢复）
+    with __import__("unittest.mock").mock.patch(
+        "memory.short_term._load_from_mysql", return_value=[]
+    ):
+        # mock MySQL 中有 summary 记录
+        summary_record = SessionSummary(session_id="s1", summary="从MySQL恢复的摘要")
+        db_session.query.return_value.filter.return_value.first.return_value = summary_record
+
+        result = get_short_term_memory(r, "u1", "s1", db_session=db_session)
+
+    assert result["summary"] == "从MySQL恢复的摘要"
+
+
+def test_get_short_term_memory_no_mysql_summary_returns_none():
+    """MySQL 中也无 summary 时返回 None"""
+    r = MagicMock()
+    r.get.return_value = None
+    r.lrange.return_value = []
+
+    db_session = MagicMock()
+    db_session.query.return_value.filter.return_value.first.return_value = None
+
+    with __import__("unittest.mock").mock.patch(
+        "memory.short_term._load_from_mysql", return_value=[]
+    ):
+        result = get_short_term_memory(r, "u1", "s1", db_session=db_session)
+
+    assert result["summary"] is None
