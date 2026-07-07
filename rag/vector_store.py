@@ -1,0 +1,79 @@
+"""向量化和存储：双 collection 设计，metadata 用户隔离"""
+import chromadb
+from langchain_core.documents import Document
+from langchain_chroma import Chroma
+
+from config import CHROMA_PERSIST_DIR, EMBEDDING_MODEL
+
+# Collection 名称
+RAG_COLLECTION = "rag_documents"
+SEMANTIC_COLLECTION = "semantic_memory"
+
+_embeddings = None
+
+
+def get_embeddings():
+    """单例嵌入模型"""
+    global _embeddings
+    if _embeddings is None:
+        from langchain_huggingface import HuggingFaceEmbeddings
+        _embeddings = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            encode_kwargs={"normalize_embeddings": True},
+        )
+    return _embeddings
+
+
+def _get_chroma_client():
+    """获取持久化 Chroma 客户端"""
+    return chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+
+
+def get_rag_vector_store() -> Chroma:
+    """获取 RAG 文档向量库"""
+    return Chroma(
+        collection_name=RAG_COLLECTION,
+        embedding_function=get_embeddings(),
+        persist_directory=CHROMA_PERSIST_DIR,
+    )
+
+
+def get_semantic_vector_store() -> Chroma:
+    """获取语义记忆向量库"""
+    return Chroma(
+        collection_name=SEMANTIC_COLLECTION,
+        embedding_function=get_embeddings(),
+        persist_directory=CHROMA_PERSIST_DIR,
+    )
+
+
+def add_documents_to_rag(
+    user_id: str,
+    mysql_id: str,
+    source: str,
+    chunks: list[Document],
+    created_at: str,
+):
+    """向 RAG 文档库添加文档分块"""
+    vs = get_rag_vector_store()
+    metadatas = []
+    for chunk in chunks:
+        meta = dict(chunk.metadata) if chunk.metadata else {}
+        meta.update({
+            "user_id": user_id,
+            "mysql_id": mysql_id,
+            "type": "document",
+            "source": source,
+            "created_at": created_at,
+        })
+        metadatas.append(meta)
+    vs.add_texts(
+        texts=[c.page_content for c in chunks],
+        metadatas=metadatas,
+    )
+
+
+def delete_documents_by_mysql_id(mysql_id: str):
+    """通过 mysql_id 删除 RAG 文档库中的向量"""
+    vs = get_rag_vector_store()
+    vs.delete(filter={"mysql_id": mysql_id})

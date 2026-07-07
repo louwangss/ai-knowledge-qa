@@ -1,0 +1,44 @@
+"""全局配置，从 .env 读取"""
+import os
+from dotenv import load_dotenv
+from urllib.parse import quote_plus
+
+load_dotenv()
+
+# --- 必填校验（放在 URL 构建之前） ---
+_REQUIRED = ["DEEPSEEK_API_KEY", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"]
+for _key in _REQUIRED:
+    if not os.getenv(_key):
+        raise RuntimeError(f"环境变量 {_key} 未设置，请检查 .env 文件")
+
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+# Tavily 可选（不用 web_search 时不需要）
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+
+# --- MySQL ---
+_mysql_host = os.getenv("MYSQL_HOST", "localhost")
+_mysql_port = os.getenv("MYSQL_PORT", "3306")
+_mysql_user = os.getenv("MYSQL_USER")
+_mysql_password = quote_plus(os.getenv("MYSQL_PASSWORD"))
+_mysql_db = os.getenv("MYSQL_DATABASE")
+MYSQL_URL = f"mysql+pymysql://{_mysql_user}:{_mysql_password}@{_mysql_host}:{_mysql_port}/{_mysql_db}?charset=utf8mb4"
+
+# --- Redis ---
+_redis_host = os.getenv("REDIS_HOST", "localhost")
+_redis_port = os.getenv("REDIS_PORT", "6379")
+_redis_db = os.getenv("REDIS_DB", "0")
+_redis_password = os.getenv("REDIS_PASSWORD", "")
+_redis_auth = f":{quote_plus(_redis_password)}@" if _redis_password else ""
+REDIS_URL = f"redis://{_redis_auth}{_redis_host}:{_redis_port}/{_redis_db}"
+
+# --- 路径 ---
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma_db")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./data/uploads")
+
+# --- Embedding 模型 ---
+EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+
+# --- LLM ---
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
