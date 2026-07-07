@@ -306,36 +306,39 @@ async def _stream_normal(payload: ChatRequest, context: dict):
 
 
 async def _agent_stream(prompt: str):
-    """AgentExecutor 流式：工具调用 status + LLM token + web_search sources
+    """LangChain 1.x create_agent 流式：工具调用 status + LLM token + web_search sources
 
     yield 字典事件：
       {"type": "status", "content": "..."}  — web_search 开始时
       {"type": "token", "content": "..."}   — LLM 流式 token
       {"type": "sources", "content": [...]} — 最终合并的 web_search 来源
     """
-    from langchain_core.prompts import ChatPromptTemplate
-    from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
+    from langchain.agents import create_agent
 
     llm = get_llm(temperature=0.3)
     tools = [web_search, calculator]
     today = datetime.now().strftime("%Y-%m-%d")
-    agent_prompt = ChatPromptTemplate.from_messages([
-        ("system", f"你是一个知识库问答助手。今天是 {today}。请根据提供的上下文回答问题。如果需要最新信息可以搜索（搜索词请带当前年份），需要计算可以用计算器。当用户询问对话历史时，请参考上下文中的「对话上下文」如实回答。"),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ])
-    agent = create_tool_calling_agent(llm=llm, tools=tools, prompt=agent_prompt)
-    agent_executor = AgentExecutor(agent=agent, tools=tools, max_iterations=3, verbose=False)
+    system_prompt = (
+        f"你是一个知识库问答助手。今天是 {today}。"
+        "请根据提供的上下文回答问题。如果需要最新信息可以搜索（搜索词请带当前年份），"
+        "需要计算可以用计算器。当用户询问对话历史时，请参考上下文中的「对话上下文」如实回答。"
+    )
+    agent = create_agent(model=llm, tools=tools, system_prompt=system_prompt)
 
     collected_sources = []
 
-    async for event in agent_executor.astream_events({"input": prompt}, version="v2"):
+    async for event in agent.astream_events({"messages": [("user", prompt)]}, version="v2"):
         etype = event["event"]
 
         # 工具开始：仅 web_search 发 status（有网络延迟，用户可感知）
         if etype == "on_tool_start" and event["name"] == "web_search":
-            query = event["data"].get("input", {}).get("query", "")
-            if isinstance(query, str) and query:
+            tool_input = event["data"].get("input")
+            query = ""
+            if isinstance(tool_input, dict):
+                query = tool_input.get("query", "")
+            elif isinstance(tool_input, str):
+                query = tool_input
+            if query:
                 yield {"type": "status", "content": f"正在搜索：{query}"}
 
         # 工具结束：仅 web_search 收集来源（calculator 无来源语义）

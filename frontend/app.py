@@ -270,7 +270,8 @@ async def init_app():
 
 def build_ui():
     with gr.Blocks(title="AI 知识库问答", css="""
-        .note-sidebar { max-height: 520px; overflow-y: auto; }
+        .note-sidebar { max-height: 520px; flex-wrap: nowrap !important; }
+        .note-list { max-height: 440px; overflow-y: auto; }
         .note-list label { display: flex !important; width: 100% !important;
             padding: 6px 10px !important; border-radius: 4px !important;
             cursor: pointer !important; border: none !important;
@@ -310,7 +311,7 @@ def build_ui():
                         label="模式",
                     )
                     status_md = gr.Markdown("", elem_id="status-bar")
-                    chatbot = gr.Chatbot(height=500)
+                    chatbot = gr.Chatbot(height=500, type="messages")
                     msg_input = gr.Textbox(
                         placeholder="输入问题...",
                         show_label=False,
@@ -339,10 +340,11 @@ def build_ui():
             with gr.Row():
                 # 左侧：笔记列表（Notion 风格）
                 with gr.Column(scale=1, min_width=200, elem_classes=["note-sidebar"]):
-                    new_note_btn = gr.Button("＋ 新建笔记", variant="primary", size="sm")
-                    note_list = gr.Radio(label="", choices=[], interactive=True, container=False,
+                    with gr.Row():
+                        new_note_btn = gr.Button("＋ 新建笔记", variant="primary", size="sm")
+                        delete_note_btn = gr.Button("🗑", variant="stop", size="sm")
+                    note_list = gr.Radio(label="笔记列表", choices=[], interactive=True,
                                          elem_classes=["note-list"])
-                    delete_note_btn = gr.Button("🗑 删除选中", variant="stop", size="sm")
 
                 # 右侧：编辑区（始终可编辑，自动保存）
                 with gr.Column(scale=4):
@@ -484,10 +486,10 @@ def build_ui():
             real_id = None if note_id_val in (None, -1) else note_id_val
             try:
                 status, saved_id = await api_save_note(user_id, concept, content, real_id)
-                # 新笔记首次保存 → 刷新列表（不改 value，避免触发 on_select_note 覆盖内容）
+                # 新笔记首次保存 → 刷新列表并选中刚保存的笔记
                 if real_id is None and saved_id:
                     choices = await api_list_notes(user_id)
-                    return f"✅ {status}", saved_id, current, gr.update(choices=choices), choices
+                    return f"✅ {status}", saved_id, current, gr.update(choices=choices, value=saved_id), choices
                 return f"✅ {status}", saved_id, current, gr.update(), gr.update()
             except Exception as e:
                 return f"❌ {e}", note_id_val, expected, gr.update(), gr.update()
@@ -507,7 +509,7 @@ def build_ui():
             show_progress="hidden",
         )
 
-        # 删除笔记
+        # 删除笔记（从 note_id_state 读取，而非 note_list Radio）
         async def on_delete_note(note_id_val, user_id):
             if not note_id_val or note_id_val == -1:
                 if user_id:
@@ -526,7 +528,7 @@ def build_ui():
 
         delete_note_btn.click(
             on_delete_note,
-            inputs=[note_list, user_id_state],
+            inputs=[note_id_state, user_id_state],
             outputs=[note_status, note_id_state, concept_input, content_input, note_list, _expected_content, _notes_choices],
         )
 
