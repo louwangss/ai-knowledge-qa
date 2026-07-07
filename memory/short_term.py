@@ -148,20 +148,28 @@ def _load_from_mysql(db_session, user_id: str, session_id: str) -> list[dict]:
 
 # ---- 批量摘要压缩 ----
 
-def maybe_compress(r: redis.Redis, user_id: str, session_id: str):
-    """检查是否需要触发压缩，需要则执行"""
+def maybe_compress(r: redis.Redis, user_id: str, session_id: str, db_session=None):
+    """检查是否需要触发压缩，需要则执行
+
+    Args:
+        db_session: 可选的 SQLAlchemy Session，透传给 _do_compress
+    """
     round_count = get_round_count(r, user_id, session_id)
     next_round = get_next_compress_round(r, user_id, session_id)
 
     if round_count < next_round:
         return
 
-    _do_compress(r, user_id, session_id)
+    _do_compress(r, user_id, session_id, db_session=db_session)
     r.set(_key(user_id, session_id, "next_compress_round"), next_round + _COMPRESS_INTERVAL)
 
 
-def _do_compress(r: redis.Redis, user_id: str, session_id: str):
-    """安全压缩：每次移除最旧 5 轮 = 10 条消息"""
+def _do_compress(r: redis.Redis, user_id: str, session_id: str, db_session=None):
+    """安全压缩：每次移除最旧 5 轮 = 10 条消息
+
+    Args:
+        db_session: 可选的 SQLAlchemy Session，传入时将摘要持久化到 MySQL
+    """
     summary_key = _key(user_id, session_id, "summary")
     messages_key = _key(user_id, session_id, "messages")
 
@@ -180,13 +188,35 @@ def _do_compress(r: redis.Redis, user_id: str, session_id: str):
         logger.warning("摘要生成失败，跳过压缩")
         return
 
-    # 4. 先写新摘要
+    # 4. 先写新摘要到 Redis
     r.set(summary_key, new_summary)
 
-    # 5. 再截断消息（删前 10 条，保留剩余）
+    # 5. 截断消息（删前 10 条，保留剩余）
     r.ltrim(messages_key, 10, -1)
 
+    # 6. 持久化到 MySQL（upsert 逻辑）
+    if db_session is not None:
+        _persist_summary_to_mysql(db_session, session_id, new_summary)
+
     logger.info(f"压缩完成: session={session_id}, 移除 {len(raw_old)} 条消息")
+
+
+def _persist_summary_to_mysql(db_session, session_id: str, summary: str):
+    """将摘要 upsert 到 session_summary 表"""
+    from db.models import SessionSummary
+
+    existing = db_session.query(SessionSummary).filter(
+        SessionSummary.session_id == session_id,
+    ).first()
+
+    if existing:
+        existing.summary = summary
+    else:
+        db_session.add(SessionSummary(
+            session_id=session_id,
+            summary=summary,
+        ))
+    db_session.commit()
 
 
 def _generate_summary(existing_summary: str, old_messages: list[dict]) -> str:

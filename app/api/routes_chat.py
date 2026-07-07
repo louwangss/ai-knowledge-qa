@@ -221,7 +221,7 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
             append_message(r, payload.user_id, payload.session_id, "assistant", full_answer)
 
             # 步骤 8.5: 检查是否需要触发批量摘要压缩
-            maybe_compress(r, payload.user_id, payload.session_id)
+            maybe_compress(r, payload.user_id, payload.session_id, db_session=db)
 
             # 步骤 9: 写 episodic_memory
             record_event(
