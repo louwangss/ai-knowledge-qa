@@ -4,3 +4,13 @@ data/
 __pycache__/
 *.pyc
 requirements.lock
+
+# IDE / 工具配置
+.claude/
+.superpowers/
+.pytest_cache/
+
+# 文档（非项目运行依赖）
+docs/
+CLAUDE.md
+IMPLEMENTATION_PLAN.md
