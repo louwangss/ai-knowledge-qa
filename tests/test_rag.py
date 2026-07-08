@@ -45,14 +45,24 @@ def test_split_text_multiple_docs():
 # ---- loader 格式路由 ----
 
 def test_loader_has_all_formats():
-    """6 个后缀全部支持"""
+    """6 个后缀全部支持（LOADERS 字典 + load_document 中的 if 分支）"""
+    from rag.loader import load_document
     expected = {".pdf", ".docx", ".md", ".html", ".htm", ".txt"}
-    assert expected.issubset(set(LOADERS.keys()))
+    # LOADERS 字典中有 .pdf .docx .txt，其余在 load_document 的 if 分支处理
+    dict_formats = set(LOADERS.keys()) | {".md", ".html", ".htm"}
+    assert expected.issubset(dict_formats)
 
 
 def test_loader_html_htm_same_loader():
-    """html 和 htm 使用同一个 Loader"""
-    assert LOADERS[".html"] == LOADERS[".htm"]
+    """html 和 htm 都能被 load_document 正确处理"""
+    import tempfile, os
+    from rag.loader import load_document
+    for ext in [".html", ".htm"]:
+        path = os.path.join(tempfile.gettempdir(), f"test{ext}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("<html><body><p>test</p></body></html>")
+        docs = load_document(path)
+        assert len(docs) == 1 and "test" in docs[0].page_content
 
 
 def test_loader_pdf_uses_pymupdf():

@@ -14,7 +14,7 @@ from app.stream_utils import stream_with_idle_timeout
 from db.models import ChatHistory, Session as SessionModel, User
 from memory.short_term import (
     get_redis, append_message, increment_round, renew_ttl,
-    maybe_compress, cleanup_failed_turn,
+    maybe_compress, cleanup_failed_turn, restore_from_mysql_if_needed,
 )
 from memory.episodic import record_event
 from memory.retrieve import retrieve_context
@@ -168,6 +168,9 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
         user_msg_id = user_msg.id
 
         try:
+            # 步骤 1.5: Redis 过期恢复（必须在写入当前消息之前）
+            restore_from_mysql_if_needed(r, payload.user_id, payload.session_id, db)
+
             # 步骤 2-4: Redis 写入 + 续期
             append_message(r, payload.user_id, payload.session_id, "user", payload.message)
             increment_round(r, payload.user_id, payload.session_id)

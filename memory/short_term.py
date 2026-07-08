@@ -110,6 +110,46 @@ def init_session(r: redis.Redis, user_id: str, session_id: str, db_messages: lis
 
 # ---- 读取短期记忆（Redis miss 则从 MySQL 恢复）----
 
+def restore_from_mysql_if_needed(r: redis.Redis, user_id: str, session_id: str, db_session):
+    """检查 Redis 是否过期或数据不完整，若需要则从 MySQL 恢复历史消息和摘要。
+
+    必须在 append_message（写入当前消息）之前调用，
+    否则 Redis 中已有当前消息会导致 not messages 判断失效。
+    """
+    existing = get_messages(r, user_id, session_id, count=-1)
+    mysql_messages = _load_from_mysql(db_session, user_id, session_id)
+
+    if existing and mysql_messages and len(existing) >= len(mysql_messages):
+        logger.info(f"[restore] Redis 有 {len(existing)} 条消息，数据完整，跳过恢复: session={session_id}")
+        return
+
+    if not mysql_messages:
+        logger.info(f"[restore] MySQL 无历史消息: session={session_id}")
+        return
+
+    # Redis 为空 或 Redis 消息数少于 MySQL（说明 Redis 曾过期后被部分重建）
+    logger.info(
+        f"[restore] Redis({len(existing)}条) 不完整或为空，从 MySQL 恢复 {len(mysql_messages)} 条: session={session_id}"
+    )
+    # 清除 Redis 残留数据后完整恢复
+    r.delete(_key(user_id, session_id, "messages"))
+    init_session(r, user_id, session_id, db_messages=mysql_messages)
+
+    # 恢复 MySQL 中持久化的 summary
+    mysql_summary = _load_summary_from_mysql(db_session, session_id)
+    if mysql_summary:
+        r.set(_key(user_id, session_id, "summary"), mysql_summary)
+        logger.info(f"[restore] 恢复 summary ({len(mysql_summary)} 字符): session={session_id}")
+
+    # 根据实际轮数修正 next_compress_round，避免恢复后立即误触发压缩
+    loaded_rounds = len(mysql_messages) // _MESSAGES_PER_ROUND
+    if loaded_rounds >= _INITIAL_COMPRESS_ROUND:
+        # 已经超过首次压缩点，next 应在当前轮数之后的下一个间隔
+        next_round = ((loaded_rounds // _COMPRESS_INTERVAL) + 1) * _COMPRESS_INTERVAL + 1
+        r.set(_key(user_id, session_id, "next_compress_round"), next_round)
+        logger.info(f"[restore] 修正 next_compress_round={next_round}（已恢复 {loaded_rounds} 轮）")
+
+
 def get_short_term_memory(r: redis.Redis, user_id: str, session_id: str, db_session=None) -> dict:
     """获取短期记忆上下文
 
@@ -118,10 +158,14 @@ def get_short_term_memory(r: redis.Redis, user_id: str, session_id: str, db_sess
     """
     summary = get_summary(r, user_id, session_id)
     messages = get_messages(r, user_id, session_id, count=-1)
+    logger.info(f"[get_stm] Redis messages={len(messages)}, summary={'有' if summary else '无'}: session={session_id}")
+    for i, m in enumerate(messages):
+        logger.info(f"[get_stm] msg[{i}] role={m['role']} content={m['content'][:80]}")
 
     # Redis miss（过期/新会话）→ 从 MySQL 恢复
     if not messages and db_session:
         messages = _load_from_mysql(db_session, user_id, session_id)
+        logger.info(f"[get_stm] MySQL 恢复得到 {len(messages)} 条消息: session={session_id}")
         if messages:
             init_session(r, user_id, session_id, db_messages=messages)
         # 从 MySQL 恢复 summary（无论 messages 是否存在）
@@ -141,9 +185,18 @@ def _load_summary_from_mysql(db_session, session_id: str) -> str | None:
 
 
 def _load_from_mysql(db_session, user_id: str, session_id: str) -> list[dict]:
-    """从 MySQL 加载当前会话全部对话（Redis miss 恢复用）"""
-    from db.models import ChatHistory
+    """从 MySQL 加载当前会话尚未被摘要压缩的对话（Redis miss 恢复用）
+
+    如果 session_summary 中记录了 compressed_count，则跳过前 N 条已压缩的消息。
+    """
+    from db.models import ChatHistory, SessionSummary
     from sqlalchemy import select
+
+    # 查已压缩的消息条数
+    summary_rec = db_session.query(SessionSummary).filter(
+        SessionSummary.session_id == session_id,
+    ).first()
+    skip_count = summary_rec.compressed_count if summary_rec and summary_rec.compressed_count else 0
 
     stmt = (
         select(ChatHistory)
@@ -152,7 +205,7 @@ def _load_from_mysql(db_session, user_id: str, session_id: str) -> list[dict]:
         .order_by(ChatHistory.created_at.asc())
     )
     rows = db_session.execute(stmt).scalars().all()
-    return [{"role": row.role, "content": row.content} for row in rows]
+    return [{"role": row.role, "content": row.content} for row in rows[skip_count:]]
 
 
 # ---- 批量摘要压缩 ----
@@ -205,12 +258,22 @@ def _do_compress(r: redis.Redis, user_id: str, session_id: str, db_session=None)
 
     # 6. 持久化到 MySQL（upsert 逻辑）
     if db_session is not None:
-        _persist_summary_to_mysql(db_session, session_id, new_summary)
+        # 累计已压缩的消息条数（当前已有 compressed_count + 本次压缩的条数）
+        prev_compressed = 0
+        if db_session is not None:
+            from db.models import SessionSummary as _SS
+            existing_rec = db_session.query(_SS).filter(
+                _SS.session_id == session_id,
+            ).first()
+            if existing_rec:
+                prev_compressed = existing_rec.compressed_count or 0
+        total_compressed = prev_compressed + len(raw_old)
+        _persist_summary_to_mysql(db_session, session_id, new_summary, total_compressed)
 
     logger.info(f"压缩完成: session={session_id}, 移除 {len(raw_old)} 条消息")
 
 
-def _persist_summary_to_mysql(db_session, session_id: str, summary: str):
+def _persist_summary_to_mysql(db_session, session_id: str, summary: str, compressed_count: int = 0):
     """将摘要 upsert 到 session_summary 表"""
     from db.models import SessionSummary
 
@@ -220,10 +283,12 @@ def _persist_summary_to_mysql(db_session, session_id: str, summary: str):
 
     if existing:
         existing.summary = summary
+        existing.compressed_count = compressed_count
     else:
         db_session.add(SessionSummary(
             session_id=session_id,
             summary=summary,
+            compressed_count=compressed_count,
         ))
     db_session.commit()
 

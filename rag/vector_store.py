@@ -10,6 +10,8 @@ RAG_COLLECTION = "rag_documents"
 SEMANTIC_COLLECTION = "semantic_memory"
 
 _embeddings = None
+_rag_vs: Chroma | None = None
+_semantic_vs: Chroma | None = None
 
 
 def get_embeddings():
@@ -30,21 +32,27 @@ def _get_chroma_client():
 
 
 def get_rag_vector_store() -> Chroma:
-    """获取 RAG 文档向量库"""
-    return Chroma(
-        collection_name=RAG_COLLECTION,
-        embedding_function=get_embeddings(),
-        persist_directory=CHROMA_PERSIST_DIR,
-    )
+    """获取 RAG 文档向量库（单例）"""
+    global _rag_vs
+    if _rag_vs is None:
+        _rag_vs = Chroma(
+            collection_name=RAG_COLLECTION,
+            embedding_function=get_embeddings(),
+            persist_directory=CHROMA_PERSIST_DIR,
+        )
+    return _rag_vs
 
 
 def get_semantic_vector_store() -> Chroma:
-    """获取语义记忆向量库"""
-    return Chroma(
-        collection_name=SEMANTIC_COLLECTION,
-        embedding_function=get_embeddings(),
-        persist_directory=CHROMA_PERSIST_DIR,
-    )
+    """获取语义记忆向量库（单例）"""
+    global _semantic_vs
+    if _semantic_vs is None:
+        _semantic_vs = Chroma(
+            collection_name=SEMANTIC_COLLECTION,
+            embedding_function=get_embeddings(),
+            persist_directory=CHROMA_PERSIST_DIR,
+        )
+    return _semantic_vs
 
 
 def add_documents_to_rag(

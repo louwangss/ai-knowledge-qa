@@ -177,3 +177,118 @@ def test_get_short_term_memory_no_mysql_summary_returns_none():
         result = get_short_term_memory(r, "u1", "s1", db_session=db_session)
 
     assert result["summary"] is None
+
+
+from memory.short_term import restore_from_mysql_if_needed, append_message
+
+
+def test_restore_from_mysql_when_redis_expired():
+    """Redis 过期时，restore_from_mysql_if_needed 应从 MySQL 恢复历史消息"""
+    r = MagicMock()
+    r.lrange.return_value = []  # Redis 空（已过期）
+
+    # mock pipeline（init_session 通过 pipeline 批量写入）
+    pipe = MagicMock()
+    r.pipeline.return_value = pipe
+
+    db_session = MagicMock()
+    mysql_messages = [
+        {"role": "user", "content": "第一天的第一个问题"},
+        {"role": "assistant", "content": "第一天的第一个回答"},
+        {"role": "user", "content": "第一天的第二个问题"},
+        {"role": "assistant", "content": "第一天的第二个回答"},
+    ]
+
+    with __import__("unittest.mock").mock.patch(
+        "memory.short_term._load_from_mysql", return_value=mysql_messages
+    ):
+        restore_from_mysql_if_needed(r, "u1", "s1", db_session)
+
+    # 验证通过 pipeline rpush 恢复消息
+    assert pipe.rpush.called, "应通过 pipeline rpush 将 MySQL 消息写入 Redis"
+    assert pipe.rpush.call_count == 4  # 4 条消息
+    assert r.set.called, "应设置 round_count 和 next_compress_round"
+    r.expire.assert_called()  # 续期
+
+
+def test_restore_skipped_when_redis_has_full_data():
+    """Redis 数据和 MySQL 一样多时，不应触发恢复"""
+    r = MagicMock()
+    # Redis 有 4 条
+    r.lrange.return_value = [
+        '{"role": "user", "content": "q1"}',
+        '{"role": "assistant", "content": "a1"}',
+        '{"role": "user", "content": "q2"}',
+        '{"role": "assistant", "content": "a2"}',
+    ]
+
+    db_session = MagicMock()
+    mysql_messages = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": "a2"},
+    ]
+
+    with __import__("unittest.mock").mock.patch(
+        "memory.short_term._load_from_mysql", return_value=mysql_messages
+    ):
+        restore_from_mysql_if_needed(r, "u1", "s1", db_session)
+
+    r.delete.assert_not_called(), "Redis 数据完整时不应删除重建"
+    r.pipeline.assert_not_called(), "Redis 数据完整时不应触发 pipeline 写入"
+
+
+def test_restore_when_redis_has_partial_data():
+    """Redis 消息数少于 MySQL（过期后部分重建）时，应清除残留并完整恢复"""
+    r = MagicMock()
+    # Redis 只有 2 条（最近一轮，之前过期了）
+    r.lrange.return_value = [
+        '{"role": "user", "content": "recent q"}',
+        '{"role": "assistant", "content": "recent a"}',
+    ]
+    pipe = MagicMock()
+    r.pipeline.return_value = pipe
+
+    db_session = MagicMock()
+    # MySQL 有 8 条（完整历史）
+    mysql_messages = []
+    for i in range(4):
+        mysql_messages.append({"role": "user", "content": f"old q{i}"})
+        mysql_messages.append({"role": "assistant", "content": f"old a{i}"})
+
+    with __import__("unittest.mock").mock.patch(
+        "memory.short_term._load_from_mysql", return_value=mysql_messages
+    ):
+        restore_from_mysql_if_needed(r, "u1", "s1", db_session)
+
+    # 应先删除残留的 messages key，再通过 init_session 完整恢复
+    assert r.delete.called, "应删除 Redis 中不完整的 messages"
+    assert pipe.rpush.call_count == 8, "应通过 pipeline 写入全部 8 条 MySQL 消息"
+
+
+def test_append_message_after_restore_preserves_history():
+    """恢复后 append_message 应在历史消息之后追加，不覆盖"""
+    r = MagicMock()
+    r.lrange.return_value = []  # Redis 空
+
+    pipe = MagicMock()
+    r.pipeline.return_value = pipe
+
+    db_session = MagicMock()
+    mysql_messages = [
+        {"role": "user", "content": "历史问题"},
+        {"role": "assistant", "content": "历史回答"},
+    ]
+
+    with __import__("unittest.mock").mock.patch(
+        "memory.short_term._load_from_mysql", return_value=mysql_messages
+    ):
+        restore_from_mysql_if_needed(r, "u1", "s1", db_session)
+
+    # 模拟 restore 之后的 append_message（写入当前用户消息）
+    append_message(r, "u1", "s1", "user", "今天的第一个问题")
+
+    # pipeline rpush 恢复2条历史 + 直接 rpush 写1条当前 = 总共3次 rpush
+    assert pipe.rpush.call_count == 2  # 2 条历史通过 pipeline
+    assert r.rpush.call_count == 1  # 1 条当前消息直接 rpush

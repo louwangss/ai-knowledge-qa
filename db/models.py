@@ -105,6 +105,7 @@ class SessionSummary(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     session_id = Column(String(36), ForeignKey("sessions.id"), nullable=False, unique=True)
     summary = Column(Text, nullable=False)
+    compressed_count = Column(Integer, default=0, nullable=False)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     session = relationship("Session", backref="summary_record")

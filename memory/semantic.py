@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 _SIMILARITY_DISTANCE_THRESHOLD = 0.15  # 余弦距离 <= 此值认为重复
 
 
-def check_similarity(user_id: str, content: str) -> SemanticMemory | None:
+def check_similarity(db: Session, user_id: str, content: str) -> SemanticMemory | None:
     """检查是否有相似笔记。
 
     Returns:
@@ -32,16 +32,11 @@ def check_similarity(user_id: str, content: str) -> SemanticMemory | None:
     doc, distance = results[0]
     if distance <= _SIMILARITY_DISTANCE_THRESHOLD:
         logger.info(f"相似笔记命中: distance={distance:.4f}")
-        # 通过 mysql_id 回查 MySQL
+        # 通过 mysql_id 回查 MySQL（复用调用方的 session）
         mysql_id = doc.metadata.get("mysql_id")
         if mysql_id:
-            from db.database import SessionLocal
-            db = SessionLocal()
-            try:
-                note = db.query(SemanticMemory).filter(SemanticMemory.id == int(mysql_id)).first()
-                return note
-            finally:
-                db.close()
+            note = db.query(SemanticMemory).filter(SemanticMemory.id == int(mysql_id)).first()
+            return note
     return None
 
 
@@ -57,7 +52,7 @@ def create_note(
         (note, is_duplicate) — is_duplicate=True 表示跳过写入（相似度检测命中）
     """
     # 1. 相似度检测
-    existing = check_similarity(user_id, content)
+    existing = check_similarity(db, user_id, content)
     if existing:
         return existing, True
 

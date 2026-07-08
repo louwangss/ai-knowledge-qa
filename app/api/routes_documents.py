@@ -36,8 +36,17 @@ def upload_document(
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
+    # 校验文件类型
+    ext = Path(file.filename).suffix.lower()
+    allowed_exts = {".pdf", ".docx", ".md", ".txt", ".html", ".htm"}
+    if ext not in allowed_exts:
+        raise HTTPException(status_code=415, detail=f"不支持的文件类型: {ext}，支持: {', '.join(sorted(allowed_exts))}")
+
     # 读取文件内容
     content_bytes = file.file.read()
+    if not content_bytes:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+
     content_hash = hashlib.sha256(content_bytes).hexdigest()
 
     # 检查重复（UNIQUE INDEX idx_doc_hash）
@@ -49,7 +58,6 @@ def upload_document(
         raise HTTPException(status_code=409, detail=f"文档已存在: {existing.filename}")
 
     # UUID 重命名保存
-    ext = Path(file.filename).suffix.lower()
     stored_filename = f"{uuid.uuid4()}{ext}"
     upload_dir = Path(UPLOAD_DIR)
     upload_dir.mkdir(parents=True, exist_ok=True)
