@@ -302,7 +302,8 @@ def _generate_summary(existing_summary: str, old_messages: list[dict]) -> str:
     )
 
     prompt = f"""请将以下对话内容合并为一个简洁的摘要（约 200~300 字）。
-保留关键信息（讨论的主题、重要结论），省略无关细节。
+保留关键信息（讨论的主题、重要结论、涉及的文档或笔记），省略无关细节。
+请在摘要开头标注这段对话的大致时间范围。
 
 """
     if existing_summary:

@@ -63,9 +63,9 @@ def _format_short_term(stm: dict) -> str:
         msgs = stm["messages"]
         has_summary = bool(stm.get("summary"))
         if has_summary:
-            recent = [f"[早期对话之后第{i+1}条] {m['role']}: {m['content'][:100]}" for i, m in enumerate(msgs)]
+            recent = [f"[早期对话之后第{i+1}条] {m['role']}: {m['content'][:300]}" for i, m in enumerate(msgs)]
         else:
-            recent = [f"[第{i+1}条] {m['role']}: {m['content'][:100]}" for i, m in enumerate(msgs)]
+            recent = [f"[第{i+1}条] {m['role']}: {m['content'][:300]}" for i, m in enumerate(msgs)]
         parts.append("[对话记录]\n" + "\n".join(recent))
     return "\n\n".join(parts) if parts else "无"
 
@@ -133,11 +133,12 @@ NORMAL_PROMPT = """你是一个知识库问答助手。请根据以下上下文�
 {question}
 
 要求：
-1. 优先根据文档内容回答，不要编造信息
-2. 如果文档中没有相关内容，请说明并建议用户上传文档
-3. 当用户询问对话历史（如"第一个问题""之前聊了什么"）时，请参考「对话上下文」如实回答，不要编造
-4. 涉及"今天""最新""最近"等时间词时，以开头的系统日期为准；调用 web_search 时在查询词中带上当前年份
-5. 回答要简洁准确"""
+1. 优先根据文档内容回答，引用文档时标注来源，格式：根据《来源名》...
+2. 如果文档中没有相关内容，请明确说明"文档中未找到相关内容"，不要编造信息
+3. 如果文档和笔记中有相关内容但不足以完整回答，请基于已有信息回答并指出信息不足的部分
+4. 当用户询问对话历史（如"第一个问题""之前聊了什么"）时，请参考「对话上下文」如实回答，不要编造
+5. 涉及"今天""最新""最近"等时间词时，以开头的系统日期为准；调用 web_search 时在查询词中带上当前年份
+6. 回答要简洁准确，使用 Markdown 格式（重点加粗、必要时用列表或表格）"""
 
 
 # ---- 主端点 ----
@@ -327,9 +328,13 @@ async def _agent_stream(prompt: str):
     tools = [web_search, calculator]
     today = datetime.now().strftime("%Y-%m-%d")
     system_prompt = (
-        f"你是一个知识库问答助手。今天是 {today}。"
-        "请根据提供的上下文回答问题。如果需要最新信息可以搜索（搜索词请带当前年份），"
-        "需要计算可以用计算器。当用户询问对话历史时，请参考上下文中的「对话上下文」如实回答。"
+        f"你是一个知识库问答助手。今天是 {today}。\n"
+        "请根据提供的上下文回答问题，遵循以下要求：\n"
+        "1. 优先根据文档内容回答，引用时标注来源，格式：根据《来源名》...\n"
+        "2. 如果需要最新信息可以使用 web_search（搜索词请带当前年份），需要计算可以用计算器\n"
+        "3. 文档中没有相关内容时，明确说明，不要编造\n"
+        "4. 当用户询问对话历史时，请参考上下文中的「对话上下文」如实回答\n"
+        "5. 回答使用 Markdown 格式，简洁准确"
     )
     agent = create_agent(model=llm, tools=tools, system_prompt=system_prompt)
 
