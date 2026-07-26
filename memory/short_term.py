@@ -33,11 +33,33 @@ def _key(user_id: str, session_id: str, suffix: str) -> str:
 
 # ---- 写入 ----
 
-def append_message(r: redis.Redis, user_id: str, session_id: str, role: str, content: str):
-    """追加一条消息到 Redis messages 列表"""
+def _serialize_message(
+    role: str,
+    content: str,
+    message_id: str | int | None = None,
+) -> str:
+    message = {"role": role, "content": content}
+    if message_id is not None:
+        message["message_id"] = str(message_id)
+    return json.dumps(message)
+
+
+def append_message(
+    r: redis.Redis,
+    user_id: str,
+    session_id: str,
+    role: str,
+    content: str,
+    message_id: str | int | None = None,
+):
+    """追加一条消息到 Redis messages 列表。
+
+    message_id 对应 MySQL chat_history.id，用于失败时精确移除当前消息。
+    兼容历史 Redis 数据：恢复或旧调用没有 ID 时仍可正常读取。
+    """
     r.rpush(
         _key(user_id, session_id, "messages"),
-        json.dumps({"role": role, "content": content}),
+        _serialize_message(role, content, message_id),
     )
 
 
@@ -205,7 +227,14 @@ def _load_from_mysql(db_session, user_id: str, session_id: str) -> list[dict]:
         .order_by(ChatHistory.created_at.asc())
     )
     rows = db_session.execute(stmt).scalars().all()
-    return [{"role": row.role, "content": row.content} for row in rows[skip_count:]]
+    return [
+        {
+            "role": row.role,
+            "content": row.content,
+            "message_id": str(row.id),
+        }
+        for row in rows[skip_count:]
+    ]
 
 
 # ---- 批量摘要压缩 ----
@@ -321,13 +350,33 @@ def _generate_summary(existing_summary: str, old_messages: list[dict]) -> str:
 
 # ---- Cleanup（失败回滚）----
 
-def cleanup_failed_turn(r: redis.Redis, user_id: str, session_id: str):
-    """失败后清理 Redis：RPOP 最后一条消息，DECR round_count"""
+def cleanup_failed_turn(
+    r: redis.Redis,
+    user_id: str,
+    session_id: str,
+    message_id: str | int,
+    content: str,
+    decrement_round_count: bool,
+) -> bool:
+    """精确清理失败请求写入 Redis 的 user 消息。
+
+    只删除 message_id 匹配的消息，避免并发请求追加后误删列表尾部。
+    仅当消息确实被删除且本请求曾成功增加轮数时才回退 round_count。
+    """
+    messages_key = _key(user_id, session_id, "messages")
+    encoded_message = _serialize_message("user", content, message_id)
+
     try:
-        r.rpop(_key(user_id, session_id, "messages"))
-    except Exception:
-        pass
-    try:
-        decrement_round(r, user_id, session_id)
-    except Exception:
-        pass
+        removed = bool(r.lrem(messages_key, 1, encoded_message))
+    except Exception as exc:
+        logger.warning("清理失败消息的 Redis 记录失败: %s", exc)
+        return False
+
+    if removed and decrement_round_count:
+        try:
+            if get_round_count(r, user_id, session_id) > 0:
+                decrement_round(r, user_id, session_id)
+        except Exception as exc:
+            logger.warning("回退失败消息的 round_count 失败: %s", exc)
+
+    return removed

@@ -161,32 +161,38 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
     r = get_redis()
 
     async def event_generator():
-        # 步骤 1: 写 MySQL chat_history（user 消息）
-        user_msg = ChatHistory(
-            user_id=payload.user_id,
-            session_id=payload.session_id,
-            role="user",
-            content=payload.message,
-            mode=payload.mode,
-        )
-        db.add(user_msg)
-        db.commit()
-        db.refresh(user_msg)
-        user_msg_id = user_msg.id
+        user_msg_id = None
+        round_incremented = False
+        answer_persisted = False
 
         try:
-            # 步骤 1.5: Redis 过期恢复（必须在写入当前消息之前）
+            # 步骤 1: 先恢复当前请求之前的历史，避免把当前消息恢复并追加两次
             restore_from_mysql_if_needed(r, payload.user_id, payload.session_id, db)
 
-            # 步骤 2-4: Redis 写入 + 续期
-            append_message(r, payload.user_id, payload.session_id, "user", payload.message)
-            increment_round(r, payload.user_id, payload.session_id)
-            renew_ttl(r, payload.user_id, payload.session_id)
+            # 步骤 2: 持久化当前 user 消息
+            user_msg = ChatHistory(
+                user_id=payload.user_id,
+                session_id=payload.session_id,
+                role="user",
+                content=payload.message,
+                mode=payload.mode,
+            )
+            db.add(user_msg)
+            db.commit()
+            user_msg_id = user_msg.id
 
-            # 自动生成会话标题（title 为空时）
-            if not session.title:
-                session.title = payload.message[:15]
-                db.commit()
+            # 步骤 3-4: Redis 写入 + 轮数和 TTL
+            append_message(
+                r,
+                payload.user_id,
+                payload.session_id,
+                "user",
+                payload.message,
+                message_id=user_msg_id,
+            )
+            increment_round(r, payload.user_id, payload.session_id)
+            round_incremented = True
+            renew_ttl(r, payload.user_id, payload.session_id)
 
             # 步骤 5: 并行检索
             context = await retrieve_context(
@@ -224,36 +230,27 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 all_sources = _format_sources(context) + agent_sources
 
             # 步骤 7: 写 MySQL assistant 消息
-            db.add(ChatHistory(
+            assistant_msg = ChatHistory(
                 user_id=payload.user_id,
                 session_id=payload.session_id,
                 role="assistant",
                 content=full_answer,
-            ))
-            db.commit()
-
-            # 步骤 8: RPUSH assistant 消息到 Redis
-            append_message(r, payload.user_id, payload.session_id, "assistant", full_answer)
-
-            # 步骤 8.5: 检查是否需要触发批量摘要压缩
-            maybe_compress(r, payload.user_id, payload.session_id, db_session=db)
-
-            # 步骤 9: 写 episodic_memory
-            record_event(
-                db,
-                user_id=payload.user_id,
-                session_id=payload.session_id,
-                event_type="qa_completed",
-                content=f"用户提问了「{payload.message[:50]}」，基于{'深度研究' if payload.mode == 'deep' else '普通问答'}模式回答",
-                question_text=payload.message,
             )
-
-            # 步骤 10: UPDATE last_active
-            session.last_active = datetime.utcnow()
+            if not session.title:
+                session.title = payload.message[:15]
+            db.add(assistant_msg)
             db.commit()
+            answer_persisted = True
 
-            # 步骤 11: 统一续期
-            renew_ttl(r, payload.user_id, payload.session_id)
+            # 步骤 8-11 是可补偿的派生状态；失败不能破坏已持久化的完整问答
+            _finalize_completed_turn(
+                db=db,
+                r=r,
+                payload=payload,
+                session=session,
+                assistant_msg_id=assistant_msg.id,
+                full_answer=full_answer,
+            )
 
             # sources + done
             yield _sse("sources", {"content": all_sources})
@@ -261,12 +258,16 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
 
         except asyncio.CancelledError:
             logger.info(f"客户端断开，session={payload.session_id}")
-            _cleanup(db, r, payload, user_msg_id)
+            if not answer_persisted:
+                _cleanup(db, r, payload, user_msg_id, round_incremented)
             raise
         except Exception as e:
             logger.error(f"Chat 错误: {e}", exc_info=True)
+            if not answer_persisted:
+                _cleanup(db, r, payload, user_msg_id, round_incremented)
+            else:
+                db.rollback()
             yield _sse("error", {"content": _get_error_message(e)})
-            _cleanup(db, r, payload, user_msg_id)
 
     return StreamingResponse(
         event_generator(),
@@ -275,17 +276,89 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
     )
 
 
-def _cleanup(db: Session, r, payload: ChatRequest, user_msg_id: int):
-    """失败清理：best-effort"""
+def _finalize_completed_turn(
+    db: Session,
+    r,
+    payload: ChatRequest,
+    session: SessionModel,
+    assistant_msg_id: int,
+    full_answer: str,
+):
+    """best-effort 更新已完成问答的派生状态。"""
+    assistant_cached = False
     try:
-        cleanup_failed_turn(r, payload.user_id, payload.session_id)
-    except Exception:
-        pass
+        append_message(
+            r,
+            payload.user_id,
+            payload.session_id,
+            "assistant",
+            full_answer,
+            message_id=assistant_msg_id,
+        )
+        assistant_cached = True
+    except Exception as exc:
+        logger.warning("assistant 消息写入 Redis 失败，将在下次请求恢复: %s", exc)
+
+    if assistant_cached:
+        try:
+            maybe_compress(r, payload.user_id, payload.session_id, db_session=db)
+        except Exception as exc:
+            db.rollback()
+            logger.warning("短期记忆压缩失败，保留已完成问答: %s", exc)
+
     try:
+        record_event(
+            db,
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            event_type="qa_completed",
+            content=f"用户提问了「{payload.message[:50]}」，基于{'深度研究' if payload.mode == 'deep' else '普通问答'}模式回答",
+            question_text=payload.message,
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.warning("情景记忆写入失败，保留已完成问答: %s", exc)
+
+    try:
+        session.last_active = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("会话活跃时间更新失败，保留已完成问答: %s", exc)
+
+    try:
+        renew_ttl(r, payload.user_id, payload.session_id)
+    except Exception as exc:
+        logger.warning("短期记忆 TTL 续期失败: %s", exc)
+
+
+def _cleanup(
+    db: Session,
+    r,
+    payload: ChatRequest,
+    user_msg_id: int | None,
+    round_incremented: bool,
+):
+    """清理尚未完成的当前问答，不影响其他请求或既有消息。"""
+    if user_msg_id is not None:
+        cleanup_failed_turn(
+            r,
+            payload.user_id,
+            payload.session_id,
+            message_id=user_msg_id,
+            content=payload.message,
+            decrement_round_count=round_incremented,
+        )
+
+    try:
+        db.rollback()
+        if user_msg_id is None:
+            return
         db.query(ChatHistory).filter(ChatHistory.id == user_msg_id).delete()
         db.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        db.rollback()
+        logger.warning("失败 user 消息从 MySQL 清理失败: %s", exc)
 
 
 # ---- normal 模式流式 ----

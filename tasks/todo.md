@@ -8,10 +8,10 @@
 
 ## Phase 1：数据一致性
 
-- [ ] Task 1：修复 Chat 冷恢复顺序和阶段化失败清理。
-  - [ ] 先增加重复消息、精确回滚、完成后辅助失败测试。
-  - [ ] 保持 SSE 事件契约不变。
-  - [ ] 运行 `pytest tests/test_chat_consistency.py tests/test_memory.py -q`。
+- [x] Task 1：修复 Chat 冷恢复顺序和阶段化失败清理。
+  - [x] 先增加重复消息、精确回滚、完成后辅助失败测试。
+  - [x] 保持 SSE 事件契约不变。
+  - [x] 运行 `pytest tests/test_chat_consistency.py tests/test_memory.py -q`。
 - [ ] Task 2：消除并行检索共享 SQLAlchemy Session。
   - [ ] 每个工作线程独立创建并关闭 DB Session。
   - [ ] 验证 normal/deep 返回结构不变。
