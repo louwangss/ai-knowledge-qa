@@ -154,7 +154,10 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == payload.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    session = db.query(SessionModel).filter(SessionModel.id == payload.session_id).first()
+    session = db.query(SessionModel).filter(
+        SessionModel.id == payload.session_id,
+        SessionModel.user_id == payload.user_id,
+    ).first()
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
@@ -497,6 +500,13 @@ def get_chat_history(
     session_id: str = Query(...),
     db: Session = Depends(get_db),
 ):
+    session = db.query(SessionModel).filter(
+        SessionModel.id == session_id,
+        SessionModel.user_id == user_id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
     return db.query(ChatHistory).filter(
         ChatHistory.user_id == user_id,
         ChatHistory.session_id == session_id,

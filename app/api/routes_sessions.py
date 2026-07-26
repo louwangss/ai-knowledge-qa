@@ -1,4 +1,5 @@
 """会话路由：POST 创建、GET 列表、DELETE 删除"""
+import logging
 import uuid
 from datetime import datetime
 
@@ -7,8 +8,16 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_db
 from app.models.schemas import SessionCreate, SessionResponse
-from db.models import Session as SessionModel, ChatHistory, EpisodicMemory, User
+from db.models import (
+    Session as SessionModel,
+    ChatHistory,
+    EpisodicMemory,
+    SessionSummary,
+    User,
+)
+from memory.short_term import delete_session_memory, get_redis
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 
@@ -47,8 +56,20 @@ def delete_session(session_id: str, user_id: str = Query(...), db: Session = Dep
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    db.query(ChatHistory).filter(ChatHistory.session_id == session_id).delete()
-    db.query(EpisodicMemory).filter(EpisodicMemory.session_id == session_id).delete()
-    db.delete(session)
-    db.commit()
+    try:
+        db.query(ChatHistory).filter(ChatHistory.session_id == session_id).delete()
+        db.query(EpisodicMemory).filter(EpisodicMemory.session_id == session_id).delete()
+        db.query(SessionSummary).filter(SessionSummary.session_id == session_id).delete()
+        db.delete(session)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    # Redis 是可重建派生状态；数据库删除成功后尽力清理，失败时由 TTL 最终回收。
+    try:
+        delete_session_memory(get_redis(), user_id, session_id)
+    except Exception as exc:
+        logger.warning("会话已删除，但 Redis 短期记忆清理失败: %s", exc)
+
     return {"detail": "删除成功"}

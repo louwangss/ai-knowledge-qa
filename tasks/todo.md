@@ -16,11 +16,14 @@
   - [x] 每个工作线程独立创建并关闭 DB Session。
   - [x] 验证 normal/deep 返回结构不变。
   - [x] 运行 `pytest tests/test_memory.py tests/test_agents.py -q`。
-- [ ] Task 3：完整删除会话摘要和 Redis 状态。
-  - [ ] 覆盖存在 `SessionSummary` 的删除测试。
-  - [ ] 覆盖跨用户访问/删除测试。
-  - [ ] 运行 `pytest tests/test_api.py -q -k "session"`。
-- [ ] Checkpoint A：运行 `pytest -q`、`git diff --check` 和三条手动故障路径。
+- [x] Task 3：完整删除会话摘要和 Redis 状态。
+  - [x] 覆盖存在 `SessionSummary` 的删除测试。
+  - [x] 覆盖跨用户访问/删除测试。
+  - [x] 运行会话、Chat 与记忆针对性测试。
+- [ ] Checkpoint A：完成自动化验证后，再做真实 MySQL/Redis 联调。
+  - [x] 运行 `pytest -q` 与 `git diff --check`。
+  - [x] 覆盖 Redis miss、LLM 中断和带摘要会话删除的自动化故障路径。
+  - [ ] 使用本地 MySQL/Redis 完成一次非破坏性联调。
 
 ## Phase 2：安全与资源边界
 

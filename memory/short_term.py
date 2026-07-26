@@ -81,6 +81,15 @@ def renew_ttl(r: redis.Redis, user_id: str, session_id: str):
         r.expire(_key(user_id, session_id, suffix), _TTL)
 
 
+def delete_session_memory(r: redis.Redis, user_id: str, session_id: str) -> int:
+    """删除一个会话的全部短期记忆 key，返回实际删除数量。"""
+    keys = [
+        _key(user_id, session_id, suffix)
+        for suffix in ["summary", "messages", "round_count", "next_compress_round"]
+    ]
+    return r.delete(*keys)
+
+
 # ---- 读取 ----
 
 def get_summary(r: redis.Redis, user_id: str, session_id: str) -> str | None:
