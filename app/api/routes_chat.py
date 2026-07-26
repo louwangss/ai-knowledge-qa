@@ -199,7 +199,6 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 user_id=payload.user_id,
                 session_id=payload.session_id,
                 question=payload.message,
-                db=db,
                 mode=payload.mode,
             )
 

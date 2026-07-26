@@ -12,10 +12,10 @@
   - [x] 先增加重复消息、精确回滚、完成后辅助失败测试。
   - [x] 保持 SSE 事件契约不变。
   - [x] 运行 `pytest tests/test_chat_consistency.py tests/test_memory.py -q`。
-- [ ] Task 2：消除并行检索共享 SQLAlchemy Session。
-  - [ ] 每个工作线程独立创建并关闭 DB Session。
-  - [ ] 验证 normal/deep 返回结构不变。
-  - [ ] 运行 `pytest tests/test_memory.py tests/test_agents.py -q`。
+- [x] Task 2：消除并行检索共享 SQLAlchemy Session。
+  - [x] 每个工作线程独立创建并关闭 DB Session。
+  - [x] 验证 normal/deep 返回结构不变。
+  - [x] 运行 `pytest tests/test_memory.py tests/test_agents.py -q`。
 - [ ] Task 3：完整删除会话摘要和 Redis 状态。
   - [ ] 覆盖存在 `SessionSummary` 的删除测试。
   - [ ] 覆盖跨用户访问/删除测试。

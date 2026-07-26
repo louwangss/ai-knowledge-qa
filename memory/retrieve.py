@@ -3,8 +3,8 @@ import asyncio
 import logging
 
 from langchain_chroma import Chroma
-from sqlalchemy.orm import Session
 
+from db.database import SessionLocal
 from rag.vector_store import get_rag_vector_store, get_semantic_vector_store
 from memory.episodic import get_recent_events
 from memory.short_term import get_short_term_memory, get_redis
@@ -40,11 +40,28 @@ def _filter_by_relevance(docs: list[dict], threshold: float) -> list[dict]:
     return [d for d in docs if d.get("score", 0) >= threshold]
 
 
+def _load_recent_events(user_id: str, limit: int):
+    """在当前工作线程内创建并关闭情景记忆查询 Session。"""
+    db = SessionLocal()
+    try:
+        return get_recent_events(db, user_id, limit)
+    finally:
+        db.close()
+
+
+def _load_short_term(r, user_id: str, session_id: str) -> dict:
+    """在当前工作线程内创建并关闭短期记忆恢复 Session。"""
+    db = SessionLocal()
+    try:
+        return get_short_term_memory(r, user_id, session_id, db)
+    finally:
+        db.close()
+
+
 async def retrieve_context(
     user_id: str,
     session_id: str,
     question: str,
-    db: Session,
     mode: str = "normal",
 ) -> dict:
     """并行检索所有记忆源，合并返回。
@@ -60,24 +77,24 @@ async def retrieve_context(
     async def search_async(vs, uid, q, top_k, doc_type):
         return await asyncio.to_thread(_sync_chroma_search, vs, uid, q, top_k, doc_type)
 
-    async def search_episodic(db, uid, limit):
-        return await asyncio.to_thread(get_recent_events, db, uid, limit)
+    async def search_episodic(uid, limit):
+        return await asyncio.to_thread(_load_recent_events, uid, limit)
 
-    async def get_short_term(r, uid, sid, db):
-        return await asyncio.to_thread(get_short_term_memory, r, uid, sid, db)
+    async def get_short_term(r, uid, sid):
+        return await asyncio.to_thread(_load_short_term, r, uid, sid)
 
     if mode == "normal":
         doc_results, note_results, episodic_results, short_term = await asyncio.gather(
             search_async(rag_vs, user_id, question, top_k=3, doc_type="document"),
             search_async(semantic_vs, user_id, question, top_k=3, doc_type="note"),
-            search_episodic(db, user_id, limit=5),
-            get_short_term(r, user_id, session_id, db),
+            search_episodic(user_id, limit=5),
+            get_short_term(r, user_id, session_id),
         )
     else:  # deep 模式跳过文档检索
         note_results, episodic_results, short_term = await asyncio.gather(
             search_async(semantic_vs, user_id, question, top_k=3, doc_type="note"),
-            search_episodic(db, user_id, limit=5),
-            get_short_term(r, user_id, session_id, db),
+            search_episodic(user_id, limit=5),
+            get_short_term(r, user_id, session_id),
         )
         doc_results = []
 
