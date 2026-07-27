@@ -1,373 +1,215 @@
 # AI 知识库问答系统
 
-一个基于 RAG（检索增强生成）和多 Agent 工作流的个人知识库问答系统。用户可上传文档、保存笔记，并在普通问答或深度研究模式下获得带来源提示的流式回答。
+一个面向个人知识管理的 RAG + 多 Agent 问答项目。系统支持上传文档、普通流式问答和深度研究，并围绕数据一致性、单用户安全边界、失败恢复、低敏感可观测性和可复现实验补齐了工程化证据。
 
-> 当前版本定位为单用户 MVP，适合本地使用或单台 Linux 云服务器部署。它不包含用户认证、租户隔离、容器化、监控告警或 CI/CD。
+> 项目定位：本地或可信内网中的单用户演示系统，不是完整多租户 SaaS，也不应未经额外保护直接暴露到公网。
 
-## 功能概览
+## 项目亮点
 
-- 上传并检索 PDF、DOCX、TXT、Markdown、HTML/HTM 文档
-- 文档 SHA-256 去重，固定按 `chunk_size=1000`、`chunk_overlap=200` 切分
-- 普通问答，结合文档、笔记、情景记忆和短期对话上下文
-- 深度研究，自动拆题、并发检索并结构化整合答案
-- MySQL 持久化会话、消息、文档元数据和笔记
-- Redis 短期记忆与摘要压缩，过期后可从 MySQL 恢复
-- Chroma 持久化向量检索，使用 `BAAI/bge-small-zh-v1.5` 嵌入模型
-- 可选 Tavily 联网搜索和计算器工具调用
-- FastAPI SSE 逐 token 输出，Gradio 实时展示
+- **双模式问答**：normal 模式并行检索四类上下文；deep 模式通过 LangGraph 完成拆题、并行检索和结构化整合。
+- **三层记忆**：Redis 短期记忆、MySQL 情景记忆、MySQL + Chroma 语义记忆，明确区分权威数据与可重建索引。
+- **一致性恢复**：Redis 冷恢复不会重复当前消息；LLM 中断只回滚当前 pending turn；完整回答提交后，辅助状态失败不会破坏问答记录。
+- **安全边界**：业务 API 使用 Bearer token，后端固定单一 `APP_USER_ID`；上传有流式大小限制，文档删除失败保留可重试的权威记录。
+- **可观测性**：request/turn ID 串联检索、首 token、完成和失败阶段；日志只记录 ID、计数、耗时、模式与错误类型。
+- **可验证交付**：94 项自动化测试、真实本地 MySQL/Redis 只读联调、无密钥 GitHub Actions 和公开离线评测基线。
 
-## 技术栈
-
-| 分类 | 技术 |
-| --- | --- |
-| 后端与前端 | FastAPI、Uvicorn、Gradio、httpx |
-| LLM 与编排 | DeepSeek 兼容 API、LangChain、LangGraph |
-| RAG | ChromaDB、Sentence Transformers、PyMuPDF、docx2txt |
-| 数据与记忆 | MySQL、Redis、SQLAlchemy |
-| 可选工具 | Tavily、numexpr |
-
-## 架构说明
+## 架构
 
 ```mermaid
 flowchart LR
-    U[用户] --> G[Gradio 前端 :7860]
-    G -->|HTTP + SSE| A[FastAPI :8000]
+    U["用户"] --> G["Gradio :7860"]
+    G -->|"Bearer + HTTP/SSE"| A["FastAPI :8000"]
 
-    A --> C{问答模式}
-    C -->|normal| R[并行上下文检索]
-    C -->|deep| GA[Agent A: 拆解问题]
+    A --> M{"问答模式"}
+    M -->|"normal"| R["并行上下文检索"]
+    M -->|"deep"| D["Agent A：拆题"]
+    D --> E["Agent B：并行检索"]
+    E --> S["Agent C：整合"]
 
-    R --> CH[(Chroma\n文档与笔记索引)]
-    R --> MY[(MySQL\n会话、消息、笔记、事件)]
-    R --> RE[(Redis\n短期记忆与摘要)]
-
-    GA --> GB[Agent B: 并发检索]
-    GB --> CH
-    GB --> GC[Agent C: 结构化整合]
-
-    R --> L[DeepSeek 兼容 LLM API]
-    GC --> L
-    A -. 可选工具调用 .-> T[Tavily Web Search]
-    A -. 可选工具调用 .-> K[Calculator]
+    R --> C[("Chroma 文档/笔记索引")]
+    E --> C
+    R --> MY[("MySQL 权威业务记录")]
+    R --> RE[("Redis 短期记忆")]
+    R --> L["DeepSeek 兼容 LLM"]
+    S --> L
+    A -. "可选" .-> T["Tavily / Calculator"]
 ```
 
-### 文档入库链路
+### Chat 状态流
 
-1. 前端向 `POST /api/v1/documents` 上传文件。
-2. 后端计算内容哈希，拒绝重复上传。
-3. Loader 解析文本，Splitter 按 `1000 / 200` 参数分块。
-4. 使用 `BAAI/bge-small-zh-v1.5` 生成向量，写入 Chroma 的 `rag_documents` collection。
-5. 文档元数据写入 MySQL，原始文件保存到 `UPLOAD_DIR`。
+```text
+Bearer 认证与资源归属校验
+  -> 从 MySQL 恢复当前请求之前的 Redis 历史
+  -> MySQL 持久化 user 消息并获得精确消息 ID
+  -> Redis 追加消息、轮次和 TTL
+  -> 并行检索上下文
+  -> normal/deep 流式生成
+  -> MySQL 持久化 assistant 消息
+  -> best-effort 更新 Redis、摘要、事件和 last_active
+  -> sources + done
+```
 
-### 普通问答链路
+生成未完成时按消息 ID 清理当前 turn；assistant 已持久化后，Redis 或情景记忆等派生步骤失败只记录降级事件，下一次请求可从 MySQL 恢复。
 
-1. `POST /api/v1/chat` 先将用户消息写入 MySQL。
-2. Redis 若过期或不完整，先从 MySQL 恢复摘要和未压缩消息。
-3. 并行检索文档、用户笔记、情景记忆与短期对话记录。
-4. 将上下文注入 Prompt，调用 LLM 并经 SSE 返回增量 token。
-5. 回答写入 MySQL 和 Redis，必要时压缩早期对话，并记录 `qa_completed` 事件。
+### 文档生命周期
 
-### 深度研究链路
+上传按块读取并增量计算 SHA-256，超过 `MAX_UPLOAD_BYTES` 时在解析和 embedding 前返回 413。临时文件通过原子改名进入正式目录；解析、向量化或重复校验失败不会留下新数据库记录。删除时先处理 Chroma 派生索引，失败则保留 MySQL 权威记录与源文件以便重试。
 
-深度模式采用 LangGraph 的线性工作流：
+## 技术栈
 
-1. **Agent A，问题拆解**：把原问题拆成 3 至 5 个可检索子问题。
-2. **Agent B，文档检索**：通过线程池并行检索每个子问题，按文档内容去重。
-3. **Agent C，结果整合**：按“概述、详细分析、关联总结”组织回答，并逐 token 写入 LangGraph custom stream。
-
-### 三层记忆
-
-| 层级 | 存储 | 作用 |
-| --- | --- | --- |
-| 短期记忆 | Redis + MySQL 摘要备份 | 保存近期消息。TTL 为 30 分钟，第 11 轮首次压缩，之后每 5 轮压缩一次。 |
-| 情景记忆 | MySQL | 记录完成问答等关键事件，辅助理解用户学习历程。 |
-| 语义记忆 | MySQL + Chroma 索引 | 保存用户笔记，MySQL 为主数据源，Chroma 用于语义检索。 |
-
-## 关键 Prompt 与 Vibe 思路
-
-本项目将 Prompt 视作可维护的应用逻辑，而不是一次性文案。核心原则是将模型能力限制在可追溯的上下文中，并用明确输出结构提升稳定性。
-
-| 位置 | 目标与约束 |
+| 领域 | 技术 |
 | --- | --- |
-| `app/api/routes_chat.py::NORMAL_PROMPT` | 注入文档、笔记、情景记忆和对话上下文。优先引用文档，未检索到时必须明确说明，禁止凭模型自身知识编造。 |
-| `app/api/routes_chat.py::_agent_stream` | 在保留知识库优先原则的前提下，允许模型按需调用联网搜索或计算器。 |
-| `agents/decomposer.py::PROMPT` | 通过 few-shot 示例约束模型输出 3 至 5 个简洁子问题，并要求 JSON 数组格式。 |
-| `agents/summarizer.py::_build_prompt` | 将深度研究答案固定为概述、详细分析、关联总结，并要求关键事实标注文档来源。 |
-| `memory/short_term.py::_generate_summary` | 将早期消息压缩为约 200 至 300 字摘要，保留主题、结论和涉及的文档或笔记。 |
+| API / UI | FastAPI、SSE、Gradio、httpx |
+| LLM / Agent | DeepSeek 兼容 API、LangChain、LangGraph |
+| RAG | ChromaDB、`BAAI/bge-small-zh-v1.5`、PyMuPDF、docx2txt |
+| 数据 | MySQL、Redis、SQLAlchemy |
+| 工程质量 | pytest、GitHub Actions、结构化事件日志、离线评测 CLI |
 
-### Vibe 与 AI 辅助开发思路
+## 快速开始
 
-- **先约束再生成**：用“引用来源、信息不足时直说、禁止编造”等规则降低幻觉风险。
-- **结构优先**：拆题使用 JSON，深度回答使用固定 Markdown 层级，方便后续解析、展示和测试。
-- **渐进式增强**：默认走稳定的 RAG 流式链路，仅在配置 `TAVILY_API_KEY` 后启用工具型 Agent。
-- **可追溯迭代**：Prompt 优化通过 Git 提交记录，便于比较效果和回滚。
-- **AI 编程上下文**：仓库保留项目架构、运行约定与实现规划，帮助 AI 编程助手在已有边界内完成迭代。该说明不代表项目由某个特定 AI 工具自动生成。
+### 1. 环境要求
 
-## AI 调用逻辑
-
-### DeepSeek 兼容调用与流式输出
-
-- `rag/llm.py` 统一创建 `ChatOpenAI` 实例，默认模型为 `deepseek-chat`，可通过 `LLM_MODEL` 和 `LLM_BASE_URL` 覆盖。
-- 普通模式使用 `llm.astream()` 异步读取增量内容。
-- `stream_with_idle_timeout()` 为每个 chunk 设定 30 秒空闲超时，避免请求无限挂起。
-- API 返回 `text/event-stream`，事件类型包括：
-
-| SSE 事件 | 含义 |
-| --- | --- |
-| `token` | 回答的增量文本 |
-| `status` | 深度研究阶段或联网搜索状态 |
-| `sources` | 文档和联网搜索来源 |
-| `done` | 本轮回答完成 |
-| `error` | 可显示的失败信息 |
-
-### Function Calling 风格的工具调用
-
-当 `TAVILY_API_KEY` 非空时，普通模式会升级为 LangChain `create_agent`：
-
-1. Agent 可调用 `web_search` 和 `calculator` 两个工具。
-2. 使用 `astream_events(version="v2")` 监听 `on_tool_start`、`on_tool_end` 与 `on_chat_model_stream`。
-3. 搜索开始时向前端发送 `status`，结束时提取网页标题和 URL 并合并到 `sources`。
-4. Agent 失败会自动回退到不调用工具的普通 LLM 流式链路。
-
-> 这里的“function calling”指由 LangChain Agent 编排的工具调用能力。是否实际触发工具由模型根据系统提示和用户问题决定。
-
-## 本地开发
-
-### 1. 准备依赖
-
-建议使用 Python 3.11 或更高版本，并已安装 MySQL、Redis。
+- Python 3.11+
+- MySQL 8.x
+- Redis 6.x+
 
 ```bash
-git clone <你的 GitHub 仓库地址>
+git clone <你的仓库地址>
 cd ai-knowledge-qa
-
 python -m venv venv
-# Linux/macOS
-source venv/bin/activate
+
 # Windows PowerShell
-# .\venv\Scripts\Activate.ps1
+.\venv\Scripts\Activate.ps1
+# Linux/macOS
+# source venv/bin/activate
 
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-项目代码还使用 LangChain 的拆分包。若启动时提示缺少模块，可补充安装：
+### 2. 配置
 
-```bash
-pip install langchain-chroma langchain-huggingface langchain-classic
-```
-
-### 2. 配置环境变量
-
-复制示例文件并填入真实凭据，切勿提交 `.env`：
+复制 `.env.example` 为 `.env`，不要提交真实配置：
 
 ```bash
 cp .env.example .env
 ```
 
-| 变量 | 必填 | 说明 |
+| 变量 | 必填 | 用途 |
 | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 是 | DeepSeek API 密钥 |
-| `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` | 是 | MySQL 连接配置 |
-| `REDIS_HOST`、`REDIS_PORT`、`REDIS_DB`、`REDIS_PASSWORD` | 否 | Redis 连接配置，密码可留空 |
-| `TAVILY_API_KEY` | 否 | 配置后启用联网搜索工具 |
-| `API_URL` | 前端使用 | Gradio 服务访问 FastAPI 的地址，单机默认 `http://localhost:8000` |
-| `CHROMA_PERSIST_DIR`、`UPLOAD_DIR` | 否 | 向量库与上传文件的持久化目录 |
-| `LLM_MODEL`、`LLM_BASE_URL` | 否 | 覆盖默认 DeepSeek 模型和兼容 API 地址 |
+| `DEEPSEEK_API_KEY` | 是 | LLM API 凭据 |
+| `MYSQL_*` | 是 | MySQL 连接配置 |
+| `APP_ACCESS_TOKEN` | 是 | Gradio 调用业务 API 的 Bearer token，应使用足够长的随机值 |
+| `APP_USER_ID` | 是 | 服务端允许访问的固定单用户 ID |
+| `REDIS_*` | 否 | Redis 连接配置，密码可留空 |
+| `TAVILY_API_KEY` | 否 | 非空时允许 normal Agent 使用联网搜索 |
+| `API_HOST` / `GRADIO_HOST` | 否 | 默认均为 `127.0.0.1` |
+| `MAX_UPLOAD_BYTES` | 否 | 默认 25 MiB，是当前单机演示的可调整启发式值 |
 
-### 3. 初始化并启动
+可用以下命令生成 token：
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### 3. 初始化与启动
 
 ```bash
 python -m db.init_db
 
-# 终端一，后端 API
-uvicorn app.main:app --reload
+# 终端一：后端
+python -m app.main
 
-# 终端二，前端 UI
+# 终端二：前端
 python -m frontend.app
 ```
 
-访问：
+访问 `http://127.0.0.1:7860`。健康检查位于 `http://127.0.0.1:8000/`，业务 API 位于 `/api/v1/*` 并要求 Bearer token。
 
-- 前端：`http://127.0.0.1:7860`
-- 后端健康检查：`http://127.0.0.1:8000/`
+## 验证与实测证据
 
-### 4. 测试
-
-```bash
-pytest
-```
-
-## Linux 云服务器部署
-
-以下是单台 Ubuntu/Debian 服务器的 HTTP 部署参考。没有域名时可通过公网 IP 访问，适合测试或演示。公网 HTTP 不会加密传输，请勿在不受信任网络上传输敏感内容。
-
-### 1. 安装基础服务
+### 自动化测试
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip mysql-server redis-server nginx
-
-sudo systemctl enable --now mysql redis-server nginx
+python -m pytest -q
+python -m pip check
+python -m compileall -q app agents db evaluation frontend memory rag tools
 ```
 
-将项目放到服务器，例如 `/opt/ai-knowledge-qa`，然后以专用账户运行：
+2026-07-27 在 Python 3.11 本地环境的结果：
+
+| 检查 | 实际结果 |
+| --- | --- |
+| pytest | 94 passed |
+| pip check | No broken requirements found |
+| 本地服务联调 | 根路径 200；带正确 token 的空测试用户会话查询 200；Redis PING 成功 |
+| 故障路径 | 覆盖 Redis miss、LLM 中断、超限上传、Chroma 删除失败、跨用户访问和摘要会话删除 |
+
+单元与集成测试通过不等于浏览器视觉验收。正式演示前仍应在目标机器手动完成上传、normal/deep 问答、会话切换和删除流程。
+
+### 无密钥 RAG 离线评测
 
 ```bash
-sudo useradd --system --create-home --shell /usr/sbin/nologin aiqa
-sudo mkdir -p /opt/ai-knowledge-qa
-sudo chown -R aiqa:aiqa /opt/ai-knowledge-qa
-
-sudo -u aiqa git clone <你的 GitHub 仓库地址> /opt/ai-knowledge-qa
-cd /opt/ai-knowledge-qa
-sudo -u aiqa python3 -m venv venv
-sudo -u aiqa venv/bin/pip install -r requirements.txt
-sudo -u aiqa venv/bin/pip install langchain-chroma langchain-huggingface langchain-classic
+python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 ```
 
-创建 `/opt/ai-knowledge-qa/.env`，填入生产数据库、Redis 与 DeepSeek 配置。为 `data/chroma_db` 和 `data/uploads` 保留稳定的磁盘空间，并将其纳入备份。
+已提交的实际结果见 [`evaluation/results/lexical_baseline.json`](evaluation/results/lexical_baseline.json)：
 
-初始化数据库：
+| 数据集 / 检索器 | 样本 | Recall@2 | 来源覆盖@2 | 引用完整性 |
+| --- | ---: | ---: | ---: | ---: |
+| `aiqa-public-mini-v1` / `deterministic-char-bigram-v1` | 4 文档 / 4 问题 | 1.00 | 1.00 | 1.00 |
 
-```bash
-cd /opt/ai-knowledge-qa
-sudo -u aiqa venv/bin/python -m db.init_db
-```
+指标定义：
 
-### 2. 使用 systemd 管理后端和前端
+- **Recall@K**：前 K 个结果至少命中一个期望来源的问题比例。
+- **来源覆盖@K**：被前 K 个结果找回的期望来源数 / 全部期望来源数。
+- **引用完整性**：固定参考答案中实际引用的期望来源数 / 全部期望来源数。
 
-创建 `/etc/systemd/system/aiqa-api.service`：
+这些结果只验证公开合成小样本、指标实现与确定性轻量检索基线，**不代表生产数据分布**；默认评测器不是线上使用的 BGE embedding，引用完整性也不评估实时 LLM 生成质量。结果记录数据集 SHA-256、检索器版本、运行时间和逐题分数，便于复核而不是夸大模型效果。
 
-```ini
-[Unit]
-Description=AI Knowledge QA FastAPI
-After=network.target mysql.service redis-server.service
+### CI
 
-[Service]
-User=aiqa
-Group=aiqa
-WorkingDirectory=/opt/ai-knowledge-qa
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/ai-knowledge-qa/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
-Restart=on-failure
-RestartSec=5
+`.github/workflows/test.yml` 在 push、pull request 和手动触发时执行依赖安装、`pip check`、源码编译、全量测试和离线评测。CI 使用明确的占位环境变量，不读取仓库 secret，也不调用 MySQL、Redis 或付费 LLM。
 
-[Install]
-WantedBy=multi-user.target
-```
+工作流采用官方 `actions/checkout@v6` 与 `actions/setup-python@v6`，核对日期为 2026-07-27。
 
-创建 `/etc/systemd/system/aiqa-web.service`：
+## 可观测性与隐私
 
-```ini
-[Unit]
-Description=AI Knowledge QA Gradio
-After=network.target aiqa-api.service
-Requires=aiqa-api.service
+每个 HTTP 请求返回 `X-Request-ID`。Chat turn 使用独立 `turn_id`，主要事件包括：
 
-[Service]
-User=aiqa
-Group=aiqa
-WorkingDirectory=/opt/ai-knowledge-qa
-Environment=PYTHONUNBUFFERED=1
-Environment=API_URL=http://127.0.0.1:8000
-ExecStart=/opt/ai-knowledge-qa/venv/bin/python -m frontend.app
-Restart=on-failure
-RestartSec=5
+- `request_completed`
+- `turn_started`
+- `turn_retrieval_completed`
+- `turn_first_token`
+- `turn_completed` / `turn_failed` / `turn_cancelled`
+- `turn_stage_failed`（已完成回答的派生状态降级）
 
-[Install]
-WantedBy=multi-user.target
-```
+事件消息为 JSON，只允许记录关联 ID、route 模板、状态码、模式、阶段、计数、耗时和错误类型。日志辅助函数会拒绝 `content`、`question`、`prompt`、`token`、`authorization` 等敏感字段名；不要在其他日志中自行输出请求体或完整异常上游响应。
 
-启用服务：
+## 安全边界与已知限制
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now aiqa-api aiqa-web
-sudo systemctl status aiqa-api aiqa-web
-```
+- Bearer token + 固定 `APP_USER_ID` 是单用户演示边界，不是注册、密码、角色、刷新 token 或完整多租户认证。
+- Gradio 本身没有独立登录。即使业务 API 有 token，外部监听也只适用于可信局域网；公网部署前应增加 HTTPS、反向代理认证、限流和网络访问控制。
+- 默认监听 `127.0.0.1`；不要直接暴露 FastAPI 的 8000 端口或 Gradio 的 7860 端口。
+- Chroma 的用户隔离依赖 metadata filter，而不是物理分库；当前后端再通过固定用户 ID 限制访问。
+- 系统未实现恶意文件扫描、复杂内容沙箱、全链路指标后端、告警、自动备份恢复演练或生产级容量验证。
+- 25 MiB 上传上限来自当前单机演示约束，部署前应以真实文档的解析耗时、峰值内存和 embedding 成本重新校准。
 
-### 3. 使用 Nginx 通过公网 IP 访问
+## 适合简历的表述参考
 
-创建 `/etc/nginx/sites-available/aiqa`：
+> 设计并实现基于 FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持 normal/deep 双模式 SSE 流式回答；修复跨存储状态一致性与并行 Session 问题，引入 Bearer 单用户安全边界、流式上传限制和低敏感 turn 级可观测性，并以 94 项自动化测试、无密钥 CI 与可复现离线评测固化工程证据。
 
-```nginx
-server {
-    listen 80 default_server;
-    server_name _;
+面试时建议重点解释三个取舍：为什么 MySQL 是权威数据源、为什么 Chroma/Redis 失败采用可恢复策略、为什么公开评测基线不能等同于线上模型质量。
 
-    client_max_body_size 50m;
-
-    location / {
-        proxy_pass http://127.0.0.1:7860;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 300s;
-        proxy_buffering off;
-    }
-}
-```
-
-启用配置并仅开放必要端口：
-
-```bash
-sudo ln -s /etc/nginx/sites-available/aiqa /etc/nginx/sites-enabled/aiqa
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl reload nginx
-
-sudo ufw allow OpenSSH
-sudo ufw allow 80/tcp
-sudo ufw enable
-```
-
-浏览器访问 `http://<服务器公网IP>/`。不要对外开放 `8000` 和 `7860` 端口，FastAPI 已绑定到回环地址，Gradio 端口则应由防火墙限制，仅由 Nginx 转发。
-
-查看运行日志：
-
-```bash
-journalctl -u aiqa-api -u aiqa-web -f
-```
-
-## 可选 DNS 与 HTTPS
-
-没有域名时不能为裸 IP 正常签发 Let's Encrypt 证书，因此应继续使用上面的 HTTP 测试方案，或仅在可信内网访问。
-
-当你购买或已有域名后：
-
-1. 在域名服务商的 DNS 控制台新增一条 **A 记录**，例如 `qa.example.com` 指向服务器公网 IP。
-2. 等待解析生效，并确认服务器防火墙和云厂商安全组允许 TCP `80`、`443`。
-3. 将 Nginx 的 `server_name _;` 改为 `server_name qa.example.com;`。
-4. 安装 Certbot 并签发证书：
-
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d qa.example.com
-sudo systemctl status certbot.timer
-```
-
-Certbot 会配置证书、HTTP 到 HTTPS 跳转及自动续期。完成后使用 `https://qa.example.com/` 访问服务。
-
-## 当前限制与安全建议
-
-- 前端使用固定 `default-user`，API 的 `user_id` 由客户端传入，不能视为严格的多用户隔离。
-- 文档、笔记、Chroma 数据与 MySQL 均应定期备份。
-- `.env` 包含 API 密钥与数据库密码，只能保存在服务器，权限建议设为 `chmod 600 .env`。
-- HTTPS 只能在拥有可解析域名后启用。没有 HTTPS 时避免在公网处理敏感文档或凭据。
-- 上线前应补充身份认证、授权校验、上传文件安全扫描、限流、日志脱敏、监控与备份恢复演练。
-
-## 项目目录
+## 项目结构
 
 ```text
-app/        FastAPI 路由、Pydantic Schema、错误处理与流式工具
-agents/     LangGraph 深度研究工作流
-rag/        文档加载、切分、向量库、检索与 LLM 封装
-memory/     Redis 短期记忆、MySQL 情景记忆、语义记忆
-db/         SQLAlchemy 模型、数据库连接与初始化脚本
-tools/      联网搜索与计算器工具
-frontend/   Gradio 用户界面
-tests/      自动化测试
+agents/       LangGraph 深度研究工作流
+app/          FastAPI 路由、认证、错误处理、SSE 与可观测性
+db/           SQLAlchemy 模型、连接与建表脚本
+evaluation/   公开数据集、无密钥评测 CLI 和实际结果
+frontend/     Gradio 薄客户端
+memory/       短期、情景和语义记忆
+rag/          Loader、Splitter、Chroma、Retriever 与 LLM 封装
+tests/        自动化测试
+tools/        Web Search 与 Calculator 工具
 ```
