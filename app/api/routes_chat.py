@@ -449,7 +449,7 @@ def _cleanup(
         db.commit()
     except Exception as exc:
         db.rollback()
-        logger.warning("失败 user 消息从 MySQL 清理失败: %s", exc)
+        logger.warning("失败 user 消息从 MySQL 清理失败: error_type=%s", type(exc).__name__)
 
 
 # ---- normal 模式流式 ----
@@ -476,7 +476,10 @@ async def _stream_normal(payload: ChatRequest, context: dict):
                 yield event
             return
         except Exception as e:
-            logger.warning(f"Agent 模式失败，fallback 到普通 LLM: {e}")
+            logger.warning(
+                "Agent 模式失败，fallback 到普通 LLM: error_type=%s",
+                type(e).__name__,
+            )
 
     # 普通 LLM 流式（带 idle timeout 保护）
     async for chunk in stream_with_idle_timeout(llm.astream(prompt), timeout=30.0):

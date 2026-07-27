@@ -190,8 +190,6 @@ def get_short_term_memory(r: redis.Redis, user_id: str, session_id: str, db_sess
     summary = get_summary(r, user_id, session_id)
     messages = get_messages(r, user_id, session_id, count=-1)
     logger.info(f"[get_stm] Redis messages={len(messages)}, summary={'有' if summary else '无'}: session={session_id}")
-    for i, m in enumerate(messages):
-        logger.info(f"[get_stm] msg[{i}] role={m['role']} content={m['content'][:80]}")
 
     # Redis miss（过期/新会话）→ 从 MySQL 恢复
     if not messages and db_session:
@@ -353,7 +351,7 @@ def _generate_summary(existing_summary: str, old_messages: list[dict]) -> str:
         resp = llm.invoke(prompt)
         return f"[以下为早期对话的摘要，可能遗漏部分细节]\n{resp.content}"
     except Exception as e:
-        logger.error(f"摘要 LLM 调用失败: {e}")
+        logger.error("摘要 LLM 调用失败: error_type=%s", type(e).__name__)
         return ""
 
 
@@ -378,7 +376,10 @@ def cleanup_failed_turn(
     try:
         removed = bool(r.lrem(messages_key, 1, encoded_message))
     except Exception as exc:
-        logger.warning("清理失败消息的 Redis 记录失败: %s", exc)
+        logger.warning(
+            "清理失败消息的 Redis 记录失败: error_type=%s",
+            type(exc).__name__,
+        )
         return False
 
     if removed and decrement_round_count:
@@ -386,6 +387,9 @@ def cleanup_failed_turn(
             if get_round_count(r, user_id, session_id) > 0:
                 decrement_round(r, user_id, session_id)
         except Exception as exc:
-            logger.warning("回退失败消息的 round_count 失败: %s", exc)
+            logger.warning(
+                "回退失败消息的 round_count 失败: error_type=%s",
+                type(exc).__name__,
+            )
 
     return removed

@@ -1,4 +1,5 @@
 """记忆模块测试：episodic 事件去重逻辑"""
+import logging
 from unittest.mock import MagicMock
 
 from memory.episodic import record_event
@@ -135,6 +136,21 @@ def test_do_compress_updates_existing_summary():
 
 
 from memory.short_term import get_short_term_memory
+
+
+def test_get_short_term_memory_does_not_log_message_content(caplog):
+    secret_content = "不可进入日志的私密对话正文"
+    r = MagicMock()
+    r.get.return_value = None
+    r.lrange.return_value = [
+        '{"role": "user", "content": "不可进入日志的私密对话正文"}'
+    ]
+    caplog.set_level(logging.INFO)
+
+    result = get_short_term_memory(r, "u1", "s1")
+
+    assert result["messages"][0]["content"] == secret_content
+    assert secret_content not in caplog.text
 
 
 def test_get_short_term_memory_restores_summary_from_mysql():

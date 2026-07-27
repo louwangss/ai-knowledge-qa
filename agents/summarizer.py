@@ -133,7 +133,7 @@ def agent_c_summarize(state: ResearchState) -> dict:
                 full_answer += token
                 writer({"type": "token", "content": token})
     except Exception as e:
-        logger.error(f"Agent C LLM 调用失败: {e}")
-        full_answer = f"抱歉，生成回答时发生错误：{e}"
+        logger.error("Agent C LLM 调用失败: error_type=%s", type(e).__name__)
+        full_answer = "抱歉，生成回答时发生错误，请稍后重试"
 
     return {"final_answer": full_answer}

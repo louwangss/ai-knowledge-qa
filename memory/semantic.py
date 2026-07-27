@@ -102,7 +102,7 @@ def update_note(
             vs = get_semantic_vector_store()
             vs.delete(ids=[note.chroma_id])
         except Exception as e:
-            logger.warning(f"删除旧向量失败: {e}")
+            logger.warning("删除旧向量失败: error_type=%s", type(e).__name__)
 
     note.chroma_id = None
     db.commit()
@@ -126,7 +126,7 @@ def delete_note(db: Session, note_id: int, user_id: str) -> bool:
             vs = get_semantic_vector_store()
             vs.delete(ids=[note.chroma_id])
         except Exception as e:
-            logger.warning(f"删除向量失败: {e}")
+            logger.warning("删除向量失败: error_type=%s", type(e).__name__)
 
     db.delete(note)
     db.commit()

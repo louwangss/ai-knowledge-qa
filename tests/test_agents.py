@@ -1,4 +1,6 @@
 """Agent 工作流测试：graph 结构 + state 定义 + 子问题解析"""
+import logging
+
 from agents.state import ResearchState, RetrievedDoc, RetrievedNote
 from agents.graph import build_graph
 
@@ -91,3 +93,31 @@ def _collect_edges(graph):
                     edges.add((src, d))
 
     return edges
+
+
+def test_summarizer_failure_does_not_return_or_log_upstream_detail(monkeypatch, caplog):
+    """Agent C 失败时只返回模糊消息，不泄露上游异常正文。"""
+    import langgraph.config
+    from agents import summarizer
+
+    secret_detail = "upstream-response-must-not-leak"
+
+    class BrokenLlm:
+        def stream(self, prompt):
+            raise RuntimeError(secret_detail)
+
+    monkeypatch.setattr(summarizer, "get_llm", lambda **kwargs: BrokenLlm())
+    monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: lambda event: None)
+    caplog.set_level(logging.ERROR)
+
+    result = summarizer.agent_c_summarize({
+        "original_question": "公开测试问题",
+        "retrieved_docs": [],
+        "notes": [],
+        "episodic_memory": [],
+        "short_term_memory": "",
+    })
+
+    assert secret_detail not in result["final_answer"]
+    assert secret_detail not in caplog.text
+    assert result["final_answer"] == "抱歉，生成回答时发生错误，请稍后重试"

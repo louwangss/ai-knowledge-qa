@@ -36,7 +36,7 @@ async def _compensation_loop():
             finally:
                 db.close()
         except Exception as e:
-            logger.error(f"补偿任务失败: {e}")
+            logger.error("补偿任务失败: error_type=%s", type(e).__name__)
 
 
 @asynccontextmanager

@@ -97,6 +97,7 @@ class RequestObservabilityMiddleware:
                 break
 
         request_id = _safe_request_id(incoming_id)
+        scope["request_id"] = request_id
         context_token = _request_id.set(request_id)
         started_at = time.perf_counter()
         status_code = 500

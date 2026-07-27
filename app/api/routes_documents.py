@@ -140,15 +140,23 @@ def upload_document(
         doc.chunk_count = len(chunks)
         doc.status = "ready"
         db.commit()
-    except Exception:
-        logger.error("文档处理失败: document_id=%s", doc.id, exc_info=True)
+    except Exception as exc:
+        logger.error(
+            "文档处理失败: document_id=%s, error_type=%s",
+            doc.id,
+            type(exc).__name__,
+        )
         vectors_cleaned = not vector_write_attempted
         if vector_write_attempted:
             try:
                 delete_documents_by_mysql_id(doc.id)
                 vectors_cleaned = True
             except Exception as cleanup_exc:
-                logger.warning("失败文档的部分向量清理失败: document_id=%s, error=%s", doc.id, cleanup_exc)
+                logger.warning(
+                    "失败文档的部分向量清理失败: document_id=%s, error_type=%s",
+                    doc.id,
+                    type(cleanup_exc).__name__,
+                )
 
         db.rollback()
         persisted_doc = db.get(Document, doc.id)
@@ -160,14 +168,22 @@ def upload_document(
                 file_path.unlink(missing_ok=True)
             except Exception as cleanup_exc:
                 db.rollback()
-                logger.warning("失败文档的源记录清理失败: document_id=%s, error=%s", doc.id, cleanup_exc)
+                logger.warning(
+                    "失败文档的源记录清理失败: document_id=%s, error_type=%s",
+                    doc.id,
+                    type(cleanup_exc).__name__,
+                )
         elif persisted_doc is not None:
             try:
                 persisted_doc.status = "failed"
                 db.commit()
             except Exception as cleanup_exc:
                 db.rollback()
-                logger.warning("失败文档状态更新失败: document_id=%s, error=%s", doc.id, cleanup_exc)
+                logger.warning(
+                    "失败文档状态更新失败: document_id=%s, error_type=%s",
+                    doc.id,
+                    type(cleanup_exc).__name__,
+                )
 
         raise HTTPException(status_code=500, detail="文档处理失败，请检查文件内容或稍后重试")
 
@@ -202,21 +218,33 @@ def delete_document(document_id: str, user_id: str = Query(...), db: Session = D
     try:
         delete_documents_by_mysql_id(doc.id)
     except Exception as exc:
-        logger.warning("删除文档向量失败: document_id=%s, error=%s", doc.id, exc)
+        logger.warning(
+            "删除文档向量失败: document_id=%s, error_type=%s",
+            doc.id,
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档删除暂时失败，请稍后重试")
 
     try:
         db.delete(doc)
         db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
-        logger.error("文档数据库记录删除失败: document_id=%s", document_id, exc_info=True)
+        logger.error(
+            "文档数据库记录删除失败: document_id=%s, error_type=%s",
+            document_id,
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档删除暂时失败，请稍后重试")
 
     # 数据库与向量状态已一致；本地文件失败只会形成可人工清理的磁盘孤儿。
     try:
         source_path.unlink(missing_ok=True)
     except OSError as exc:
-        logger.warning("文档记录已删除，但本地文件清理失败: document_id=%s, error=%s", document_id, exc)
+        logger.warning(
+            "文档记录已删除，但本地文件清理失败: document_id=%s, error_type=%s",
+            document_id,
+            type(exc).__name__,
+        )
 
     return {"detail": "删除成功"}

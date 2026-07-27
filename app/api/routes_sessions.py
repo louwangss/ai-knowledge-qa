@@ -73,6 +73,9 @@ def delete_session(session_id: str, user_id: str = Query(...), db: Session = Dep
     try:
         delete_session_memory(get_redis(), user_id, session_id)
     except Exception as exc:
-        logger.warning("会话已删除，但 Redis 短期记忆清理失败: %s", exc)
+        logger.warning(
+            "会话已删除，但 Redis 短期记忆清理失败: error_type=%s",
+            type(exc).__name__,
+        )
 
     return {"detail": "删除成功"}

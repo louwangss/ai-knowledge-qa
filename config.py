@@ -25,6 +25,8 @@ if not APP_ACCESS_TOKEN:
     raise RuntimeError("环境变量 APP_ACCESS_TOKEN 不能为空")
 if not APP_USER_ID:
     raise RuntimeError("环境变量 APP_USER_ID 不能为空")
+if len(APP_USER_ID) > 36:
+    raise RuntimeError("环境变量 APP_USER_ID 长度不能超过 36")
 if not API_HOST:
     raise RuntimeError("环境变量 API_HOST 不能为空")
 

@@ -1,5 +1,10 @@
 """单用户 Bearer token 与资源归属边界测试。"""
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 
 AUTH_HEADERS = {"Authorization": "Bearer test-access-token"}
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -187,3 +193,22 @@ def test_wrong_token_cannot_open_sse_stream_or_leak_token(client):
     assert response.status_code == 401
     assert response.headers["content-type"].startswith("application/json")
     assert wrong_token not in response.text
+
+
+def test_config_rejects_app_user_id_longer_than_database_column():
+    env = os.environ.copy()
+    env["APP_USER_ID"] = "x" * 37
+    env["PYTHONUTF8"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import config"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode != 0
+    assert "APP_USER_ID 长度不能超过 36" in completed.stderr
