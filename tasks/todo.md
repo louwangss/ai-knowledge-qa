@@ -55,7 +55,11 @@
   - [x] request/turn ID 串联请求、检索、首 token、完成与失败阶段。
   - [x] 日志仅记录 ID、模式、阶段、计数、耗时和错误类型。
   - [x] `pytest tests/test_observability.py tests/test_chat_consistency.py -q`。
-- [ ] Task 8：增加可公开、可复现的 RAG 离线评测。
+- [x] Task 8：增加可公开、可复现的 RAG 离线评测。
+  - [x] 公开合成数据集不含用户文档或私有数据。
+  - [x] 无密钥 CLI 输出数据集哈希、检索器版本、逐题结果和三项指标。
+  - [x] 保存 `top_k=2` 的实际基线结果并明确适用局限。
+  - [x] `pytest tests/test_evaluation.py -q` 与全量回归通过。
 - [ ] Task 9：增加无密钥 CI，完善 README 架构、取舍和实测证据。
 - [ ] Checkpoint C：全新环境验证、演示验证、安全复审和简历表述复审。
 
