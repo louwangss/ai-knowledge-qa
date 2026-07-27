@@ -16,6 +16,7 @@ from app.api.routes_notes import router as notes_router
 from app.api.routes_chat import router as chat_router
 from app.deps import require_access_token
 from app.error_handler import value_error_handler, generic_error_handler
+from app.observability import RequestObservabilityMiddleware
 from config import API_HOST
 
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +49,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI 知识库问答系统", lifespan=lifespan)
+app.add_middleware(RequestObservabilityMiddleware)
 
 # 注册路由
 _protected_dependencies = [Depends(require_access_token)]

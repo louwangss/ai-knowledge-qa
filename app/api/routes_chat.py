@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_db, require_app_user
 from app.models.schemas import ChatRequest, ChatMessage
+from app.observability import get_or_create_request_id, log_event, new_turn_id
 from app.stream_utils import stream_with_idle_timeout
 from db.models import ChatHistory, Session as SessionModel, User
 from memory.short_term import (
@@ -163,17 +165,45 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="会话不存在")
 
     r = get_redis()
+    request_id = get_or_create_request_id()
+    turn_id = new_turn_id()
 
     async def event_generator():
         user_msg_id = None
         round_incremented = False
         answer_persisted = False
+        first_token_logged = False
+        stage = "restore"
+        turn_started_at = time.perf_counter()
+
+        def turn_event(event: str, *, level: int = logging.INFO, **fields):
+            log_event(
+                logger,
+                event,
+                level=level,
+                request_id=request_id,
+                turn_id=turn_id,
+                mode=payload.mode,
+                **fields,
+            )
+
+        def record_first_token():
+            nonlocal first_token_logged
+            if first_token_logged:
+                return
+            first_token_logged = True
+            turn_event(
+                "turn_first_token",
+                duration_ms=round((time.perf_counter() - turn_started_at) * 1000, 2),
+            )
 
         try:
+            turn_event("turn_started")
             # 步骤 1: 先恢复当前请求之前的历史，避免把当前消息恢复并追加两次
             restore_from_mysql_if_needed(r, payload.user_id, payload.session_id, db)
 
             # 步骤 2: 持久化当前 user 消息
+            stage = "persist_user"
             user_msg = ChatHistory(
                 user_id=payload.user_id,
                 session_id=payload.session_id,
@@ -186,6 +216,7 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
             user_msg_id = user_msg.id
 
             # 步骤 3-4: Redis 写入 + 轮数和 TTL
+            stage = "cache_user"
             append_message(
                 r,
                 payload.user_id,
@@ -199,22 +230,33 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
             renew_ttl(r, payload.user_id, payload.session_id)
 
             # 步骤 5: 并行检索
+            stage = "retrieval"
+            retrieval_started_at = time.perf_counter()
             context = await retrieve_context(
                 user_id=payload.user_id,
                 session_id=payload.session_id,
                 question=payload.message,
                 mode=payload.mode,
             )
+            turn_event(
+                "turn_retrieval_completed",
+                duration_ms=round((time.perf_counter() - retrieval_started_at) * 1000, 2),
+                document_count=len(context.get("documents", [])),
+                note_count=len(context.get("notes", [])),
+                episodic_count=len(context.get("episodic_memory", [])),
+            )
 
             # 初始化 sources（deep 模式不改此值；normal 模式可能覆盖）
             all_sources = _format_sources(context)
 
             # 步骤 6: LLM 流式生成
+            stage = "llm"
             if payload.mode == "deep":
                 full_answer = ""
                 async for sse_str in _stream_deep(payload, context):
                     if sse_str.get("type") == "token":
                         full_answer += sse_str["content"]
+                        record_first_token()
                         yield _sse("token", {"content": sse_str["content"]})
                     elif sse_str.get("type") == "status":
                         yield _sse("status", {"content": sse_str["content"]})
@@ -224,6 +266,7 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 async for event in _stream_normal(payload, context):
                     if event["type"] == "token":
                         full_answer += event["content"]
+                        record_first_token()
                         yield _sse("token", {"content": event["content"]})
                     elif event["type"] == "status":
                         yield _sse("status", {"content": event["content"]})
@@ -233,6 +276,7 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 all_sources = _format_sources(context) + agent_sources
 
             # 步骤 7: 写 MySQL assistant 消息
+            stage = "persist_answer"
             assistant_msg = ChatHistory(
                 user_id=payload.user_id,
                 session_id=payload.session_id,
@@ -246,6 +290,7 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
             answer_persisted = True
 
             # 步骤 8-11 是可补偿的派生状态；失败不能破坏已持久化的完整问答
+            stage = "derived_state"
             _finalize_completed_turn(
                 db=db,
                 r=r,
@@ -253,6 +298,15 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 session=session,
                 assistant_msg_id=assistant_msg.id,
                 full_answer=full_answer,
+                request_id=request_id,
+                turn_id=turn_id,
+            )
+
+            turn_event(
+                "turn_completed",
+                duration_ms=round((time.perf_counter() - turn_started_at) * 1000, 2),
+                source_count=len(all_sources),
+                output_chars=len(full_answer),
             )
 
             # sources + done
@@ -260,12 +314,25 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
             yield _sse("done", {})
 
         except asyncio.CancelledError:
-            logger.info(f"客户端断开，session={payload.session_id}")
+            turn_event(
+                "turn_cancelled",
+                level=logging.WARNING,
+                stage=stage,
+                duration_ms=round((time.perf_counter() - turn_started_at) * 1000, 2),
+                answer_persisted=answer_persisted,
+            )
             if not answer_persisted:
                 _cleanup(db, r, payload, user_msg_id, round_incremented)
             raise
         except Exception as e:
-            logger.error(f"Chat 错误: {e}", exc_info=True)
+            turn_event(
+                "turn_failed",
+                level=logging.ERROR,
+                stage=stage,
+                error_type=type(e).__name__,
+                duration_ms=round((time.perf_counter() - turn_started_at) * 1000, 2),
+                answer_persisted=answer_persisted,
+            )
             if not answer_persisted:
                 _cleanup(db, r, payload, user_msg_id, round_incremented)
             else:
@@ -286,6 +353,8 @@ def _finalize_completed_turn(
     session: SessionModel,
     assistant_msg_id: int,
     full_answer: str,
+    request_id: str,
+    turn_id: str,
 ):
     """best-effort 更新已完成问答的派生状态。"""
     assistant_cached = False
@@ -300,14 +369,14 @@ def _finalize_completed_turn(
         )
         assistant_cached = True
     except Exception as exc:
-        logger.warning("assistant 消息写入 Redis 失败，将在下次请求恢复: %s", exc)
+        _log_derived_failure(request_id, turn_id, payload.mode, "redis_assistant", exc)
 
     if assistant_cached:
         try:
             maybe_compress(r, payload.user_id, payload.session_id, db_session=db)
         except Exception as exc:
             db.rollback()
-            logger.warning("短期记忆压缩失败，保留已完成问答: %s", exc)
+            _log_derived_failure(request_id, turn_id, payload.mode, "memory_compression", exc)
 
     try:
         record_event(
@@ -320,19 +389,38 @@ def _finalize_completed_turn(
         )
     except Exception as exc:
         db.rollback()
-        logger.warning("情景记忆写入失败，保留已完成问答: %s", exc)
+        _log_derived_failure(request_id, turn_id, payload.mode, "episodic_memory", exc)
 
     try:
         session.last_active = datetime.utcnow()
         db.commit()
     except Exception as exc:
         db.rollback()
-        logger.warning("会话活跃时间更新失败，保留已完成问答: %s", exc)
+        _log_derived_failure(request_id, turn_id, payload.mode, "last_active", exc)
 
     try:
         renew_ttl(r, payload.user_id, payload.session_id)
     except Exception as exc:
-        logger.warning("短期记忆 TTL 续期失败: %s", exc)
+        _log_derived_failure(request_id, turn_id, payload.mode, "redis_ttl", exc)
+
+
+def _log_derived_failure(
+    request_id: str,
+    turn_id: str,
+    mode: str,
+    stage: str,
+    exc: Exception,
+):
+    log_event(
+        logger,
+        "turn_stage_failed",
+        level=logging.WARNING,
+        request_id=request_id,
+        turn_id=turn_id,
+        mode=mode,
+        stage=stage,
+        error_type=type(exc).__name__,
+    )
 
 
 def _cleanup(

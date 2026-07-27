@@ -20,10 +20,10 @@
   - [x] 覆盖存在 `SessionSummary` 的删除测试。
   - [x] 覆盖跨用户访问/删除测试。
   - [x] 运行会话、Chat 与记忆针对性测试。
-- [ ] Checkpoint A：完成自动化验证后，再做真实 MySQL/Redis 联调。
+- [x] Checkpoint A：完成自动化验证后，再做真实 MySQL/Redis 联调。
   - [x] 运行 `pytest -q` 与 `git diff --check`。
   - [x] 覆盖 Redis miss、LLM 中断和带摘要会话删除的自动化故障路径。
-  - [ ] 使用本地 MySQL/Redis 完成一次非破坏性联调。
+  - [x] 使用本地 MySQL/Redis 完成一次非破坏性联调。
 
 ## Phase 2：安全与资源边界
 
@@ -42,11 +42,19 @@
   - [x] FastAPI 与 Gradio 默认绑定 `127.0.0.1`，外部监听要求 token。
   - [ ] 手动验证上传、两种问答、切换和删除会话。
   - [x] 运行 `pytest tests/test_frontend_client.py tests/test_auth.py -q`。
-- [ ] Checkpoint B：全量测试、`pip check`、认证和资源失败路径验证。
+- [ ] Checkpoint B：全量测试、`pip check`、认证和资源失败路径验证（自动化部分完成，待浏览器验收）。
+  - [x] 全量测试和 `pip check` 通过。
+  - [x] 无 token、错误 token、正确 token 三态有自动化覆盖。
+  - [x] 超限上传、Chroma 删除异常和 LLM 中断有自动化覆盖。
+  - [x] `.env`、`data/` 和测试产物未进入暂存区。
+  - [ ] 浏览器完成上传、normal/deep 问答、切换和删除会话。
 
 ## Phase 3：简历项目证据
 
-- [ ] Task 7：增加不记录敏感正文的请求/turn 可观测性。
+- [x] Task 7：增加不记录敏感正文的请求/turn 可观测性。
+  - [x] request/turn ID 串联请求、检索、首 token、完成与失败阶段。
+  - [x] 日志仅记录 ID、模式、阶段、计数、耗时和错误类型。
+  - [x] `pytest tests/test_observability.py tests/test_chat_consistency.py -q`。
 - [ ] Task 8：增加可公开、可复现的 RAG 离线评测。
 - [ ] Task 9：增加无密钥 CI，完善 README 架构、取舍和实测证据。
 - [ ] Checkpoint C：全新环境验证、演示验证、安全复审和简历表述复审。

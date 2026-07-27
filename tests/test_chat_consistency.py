@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -139,8 +140,9 @@ async def _collect_chat(
     redis,
     record_event_side_effect=None,
     stream_factory=_stream_answer,
+    message="本次问题",
 ):
-    payload = ChatRequest(user_id="u1", session_id="s1", message="本次问题", mode="normal")
+    payload = ChatRequest(user_id="u1", session_id="s1", message=message, mode="normal")
 
     with ExitStack() as stack:
         stack.enter_context(patch.object(routes_chat, "get_redis", return_value=redis))
@@ -255,3 +257,33 @@ def test_generation_failure_removes_pending_turn_and_does_not_leave_title(db_ses
     session = db_session.get(SessionModel, "s1")
     assert session.title is None
     assert "event: error" in stream
+
+
+def test_chat_turn_logs_stage_timings_without_user_content(db_session, caplog):
+    """一次 turn 可串联检索、首 token 和完成事件，且不泄露用户正文。"""
+    secret_question = "这是不可进入日志的完整私密问题"
+    caplog.set_level(logging.INFO)
+
+    stream = asyncio.run(
+        _collect_chat(db_session, FakeRedis(), message=secret_question)
+    )
+
+    events = []
+    for record in caplog.records:
+        try:
+            event = json.loads(record.getMessage())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if event.get("event", "").startswith("turn_"):
+            events.append(event)
+
+    assert "event: done" in stream
+    assert [event["event"] for event in events] == [
+        "turn_started",
+        "turn_retrieval_completed",
+        "turn_first_token",
+        "turn_completed",
+    ]
+    assert len({event["turn_id"] for event in events}) == 1
+    assert len({event["request_id"] for event in events}) == 1
+    assert secret_question not in caplog.text
