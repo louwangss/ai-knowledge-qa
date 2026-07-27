@@ -27,11 +27,11 @@
 
 ## Phase 2：安全与资源边界
 
-- [ ] Task 4：流式限量上传和可恢复的文档删除。
-  - [ ] 增加 `MAX_UPLOAD_BYTES` 配置及 413 测试。
-  - [ ] 保证重复、失败和超限上传无临时残留。
-  - [ ] Chroma 删除失败时保留 MySQL/源文件并返回可重试错误。
-  - [ ] 运行 `pytest tests/test_documents.py tests/test_api.py -q`。
+- [x] Task 4：流式限量上传和可恢复的文档删除。
+  - [x] 增加 `MAX_UPLOAD_BYTES` 配置及 413 测试。
+  - [x] 保证空文件、重复、失败和超限上传无临时残留。
+  - [x] Chroma 删除失败时保留 MySQL/源文件并返回可重试错误。
+  - [x] 运行 `pytest tests/test_documents.py tests/test_api.py -q`。
 - [ ] Task 5：增加单用户 Bearer token 与资源归属校验。
   - [ ] 无/错 token 返回 401。
   - [ ] 其他 `user_id` 无法访问资源。

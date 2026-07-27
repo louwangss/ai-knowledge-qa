@@ -35,6 +35,12 @@ REDIS_URL = f"redis://{_redis_auth}{_redis_host}:{_redis_port}/{_redis_db}"
 # --- 路径 ---
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma_db")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./data/uploads")
+try:
+    MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+except ValueError as exc:
+    raise RuntimeError("环境变量 MAX_UPLOAD_BYTES 必须为正整数") from exc
+if MAX_UPLOAD_BYTES <= 0:
+    raise RuntimeError("环境变量 MAX_UPLOAD_BYTES 必须为正整数")
 
 # --- Embedding 模型 ---
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
