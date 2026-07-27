@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Q
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_app_user
 from app.models.schemas import DocumentResponse
 from config import MAX_UPLOAD_BYTES, UPLOAD_DIR
 from db.models import Document, User
@@ -70,6 +70,7 @@ def upload_document(
     user_id: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    require_app_user(user_id)
     # 验证用户
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -178,6 +179,7 @@ def list_documents(
     user_id: str = Query(...),
     db: Session = Depends(get_db),
 ):
+    require_app_user(user_id)
     return db.query(Document).filter(
         Document.user_id == user_id,
         Document.status == "ready",
@@ -186,6 +188,7 @@ def list_documents(
 
 @router.delete("/{document_id}")
 def delete_document(document_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
+    require_app_user(user_id)
     doc = db.query(Document).filter(
         Document.id == document_id,
         Document.user_id == user_id,

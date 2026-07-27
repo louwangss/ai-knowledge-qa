@@ -113,24 +113,24 @@ def test_delete_session_removes_summary_relations_and_redis_state(db_session, mo
 
 
 def test_other_user_cannot_delete_session(db_session, monkeypatch):
-    """非所属用户删除会话时返回 404 且不修改任何状态。"""
+    """非应用用户删除会话时返回 403 且不修改任何状态。"""
     redis = FakeRedis()
     monkeypatch.setattr(routes_sessions, "get_redis", lambda: redis, raising=False)
 
     with pytest.raises(HTTPException) as exc_info:
         routes_sessions.delete_session("s1", user_id="u2", db=db_session)
 
-    assert exc_info.value.status_code == 404
+    assert exc_info.value.status_code == 403
     assert db_session.get(SessionModel, "s1") is not None
     assert db_session.execute(select(SessionSummary)).scalars().one().summary == "早期摘要"
 
 
 def test_other_user_cannot_read_session_history(db_session):
-    """历史记录接口必须先验证 session 属于请求用户。"""
+    """历史记录接口必须先拒绝非应用用户。"""
     with pytest.raises(HTTPException) as exc_info:
         routes_chat.get_chat_history(user_id="u2", session_id="s1", db=db_session)
 
-    assert exc_info.value.status_code == 404
+    assert exc_info.value.status_code == 403
 
 
 def test_other_user_cannot_start_chat_in_session(db_session):
@@ -140,6 +140,6 @@ def test_other_user_cannot_start_chat_in_session(db_session):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(routes_chat.chat(payload, db_session))
 
-    assert exc_info.value.status_code == 404
+    assert exc_info.value.status_code == 403
     rows = db_session.execute(select(ChatHistory)).scalars().all()
     assert [(row.user_id, row.content) for row in rows] == [("u1", "问题")]

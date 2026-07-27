@@ -7,13 +7,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.api.routes_users import router as users_router
 from app.api.routes_sessions import router as sessions_router
 from app.api.routes_documents import router as documents_router
 from app.api.routes_notes import router as notes_router
 from app.api.routes_chat import router as chat_router
+from app.deps import require_access_token
 from app.error_handler import value_error_handler, generic_error_handler
 
 logging.basicConfig(level=logging.INFO)
@@ -48,11 +49,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI 知识库问答系统", lifespan=lifespan)
 
 # 注册路由
-app.include_router(users_router)
-app.include_router(sessions_router)
-app.include_router(documents_router)
-app.include_router(notes_router)
-app.include_router(chat_router)
+_protected_dependencies = [Depends(require_access_token)]
+app.include_router(users_router, dependencies=_protected_dependencies)
+app.include_router(sessions_router, dependencies=_protected_dependencies)
+app.include_router(documents_router, dependencies=_protected_dependencies)
+app.include_router(notes_router, dependencies=_protected_dependencies)
+app.include_router(chat_router, dependencies=_protected_dependencies)
 
 # 错误处理
 app.add_exception_handler(ValueError, value_error_handler)

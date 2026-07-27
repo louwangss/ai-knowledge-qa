@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_app_user
 from app.models.schemas import SessionCreate, SessionResponse
 from db.models import (
     Session as SessionModel,
@@ -23,6 +23,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 @router.post("", response_model=SessionResponse)
 def create_session(payload: SessionCreate, db: Session = Depends(get_db)):
+    require_app_user(payload.user_id)
     user = db.query(User).filter(User.id == payload.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -40,6 +41,7 @@ def create_session(payload: SessionCreate, db: Session = Depends(get_db)):
 @router.get("", response_model=list[SessionResponse])
 def list_sessions(user_id: str = Query(...), db: Session = Depends(get_db)):
     """获取用户所有会话，按 last_active 降序"""
+    require_app_user(user_id)
     return db.query(SessionModel).filter(
         SessionModel.user_id == user_id,
         SessionModel.status == "active",
@@ -49,6 +51,7 @@ def list_sessions(user_id: str = Query(...), db: Session = Depends(get_db)):
 @router.delete("/{session_id}")
 def delete_session(session_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
     """硬删除会话 + 关联的 chat_history + episodic_memory"""
+    require_app_user(user_id)
     session = db.query(SessionModel).filter(
         SessionModel.id == session_id,
         SessionModel.user_id == user_id,

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_app_user
 from app.models.schemas import NoteCreate, NoteUpdate, NoteResponse
 from db.models import User
 from memory.semantic import create_note, update_note, delete_note, get_notes
@@ -12,6 +12,7 @@ router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
 
 @router.post("", response_model=NoteResponse)
 def create_note_endpoint(payload: NoteCreate, db: Session = Depends(get_db)):
+    require_app_user(payload.user_id)
     user = db.query(User).filter(User.id == payload.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -27,6 +28,7 @@ def create_note_endpoint(payload: NoteCreate, db: Session = Depends(get_db)):
 
 @router.get("", response_model=list[NoteResponse])
 def list_notes(user_id: str = Query(...), db: Session = Depends(get_db)):
+    require_app_user(user_id)
     return get_notes(db, user_id)
 
 
@@ -37,6 +39,7 @@ def update_note_endpoint(
     user_id: str = Query(...),
     db: Session = Depends(get_db),
 ):
+    require_app_user(user_id)
     note = update_note(db, note_id, user_id, payload.concept, payload.content)
     if not note:
         raise HTTPException(status_code=404, detail="笔记不存在")
@@ -45,6 +48,7 @@ def update_note_endpoint(
 
 @router.delete("/{note_id}")
 def delete_note_endpoint(note_id: int, user_id: str = Query(...), db: Session = Depends(get_db)):
+    require_app_user(user_id)
     success = delete_note(db, note_id, user_id)
     if not success:
         raise HTTPException(status_code=404, detail="笔记不存在")

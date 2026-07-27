@@ -6,12 +6,24 @@ from urllib.parse import quote_plus
 load_dotenv()
 
 # --- 必填校验（放在 URL 构建之前） ---
-_REQUIRED = ["DEEPSEEK_API_KEY", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"]
+_REQUIRED = [
+    "DEEPSEEK_API_KEY",
+    "MYSQL_USER",
+    "MYSQL_PASSWORD",
+    "MYSQL_DATABASE",
+    "APP_ACCESS_TOKEN",
+]
 for _key in _REQUIRED:
     if not os.getenv(_key):
         raise RuntimeError(f"环境变量 {_key} 未设置，请检查 .env 文件")
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "").strip()
+APP_USER_ID = os.getenv("APP_USER_ID", "default-user").strip()
+if not APP_ACCESS_TOKEN:
+    raise RuntimeError("环境变量 APP_ACCESS_TOKEN 不能为空")
+if not APP_USER_ID:
+    raise RuntimeError("环境变量 APP_USER_ID 不能为空")
 
 # Tavily 可选（不用 web_search 时不需要）
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")

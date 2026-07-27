@@ -7,6 +7,8 @@ import pytest
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
+AUTH_HEADERS = {"Authorization": "Bearer test-access-token"}
+
 
 @pytest.fixture
 def mock_db():
@@ -38,7 +40,11 @@ def test_root(client):
 def test_list_sessions_empty(client, mock_db):
     """空用户的会话列表"""
     mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
-    resp = client.get("/api/v1/sessions", params={"user_id": "nonexistent"})
+    resp = client.get(
+        "/api/v1/sessions",
+        params={"user_id": "u1"},
+        headers=AUTH_HEADERS,
+    )
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -47,6 +53,10 @@ def test_list_sessions_empty(client, mock_db):
 def test_documents_list_empty(client, mock_db):
     """空文档列表"""
     mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
-    resp = client.get("/api/v1/documents", params={"user_id": "u1"})
+    resp = client.get(
+        "/api/v1/documents",
+        params={"user_id": "u1"},
+        headers=AUTH_HEADERS,
+    )
     assert resp.status_code == 200
     assert resp.json() == []

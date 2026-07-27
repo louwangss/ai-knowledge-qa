@@ -13,6 +13,8 @@ os.environ.setdefault("MYSQL_USER", "test")
 os.environ.setdefault("MYSQL_PASSWORD", "test")
 os.environ.setdefault("MYSQL_DATABASE", "test_db")
 os.environ.setdefault("REDIS_PASSWORD", "")
+os.environ.setdefault("APP_ACCESS_TOKEN", "test-access-token")
+os.environ.setdefault("APP_USER_ID", "u1")
 
 # 项目根目录加入 path
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)

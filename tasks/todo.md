@@ -32,11 +32,11 @@
   - [x] 保证空文件、重复、失败和超限上传无临时残留。
   - [x] Chroma 删除失败时保留 MySQL/源文件并返回可重试错误。
   - [x] 运行 `pytest tests/test_documents.py tests/test_api.py -q`。
-- [ ] Task 5：增加单用户 Bearer token 与资源归属校验。
-  - [ ] 无/错 token 返回 401。
-  - [ ] 其他 `user_id` 无法访问资源。
-  - [ ] 日志和响应不泄露 token。
-  - [ ] 运行 `pytest tests/test_auth.py tests/test_api.py -q`。
+- [x] Task 5：增加单用户 Bearer token 与资源归属校验。
+  - [x] 无/错 token 返回 401。
+  - [x] 其他 `user_id` 无法访问资源。
+  - [x] 日志、响应、SSE 和 OpenAPI 不泄露 token。
+  - [x] 运行 `pytest tests/test_auth.py tests/test_api.py -q`。
 - [ ] Task 6：前端统一携带 token，服务默认绑定 `127.0.0.1`。
   - [ ] 普通请求与 SSE 请求均携带认证头。
   - [ ] 手动验证上传、两种问答、切换和删除会话。

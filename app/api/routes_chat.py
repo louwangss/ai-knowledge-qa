@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, require_app_user
 from app.models.schemas import ChatRequest, ChatMessage
 from app.stream_utils import stream_with_idle_timeout
 from db.models import ChatHistory, Session as SessionModel, User
@@ -151,6 +151,7 @@ NORMAL_PROMPT = """你是一个知识库问答助手。请根据以下上下文�
 
 @router.post("")
 async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
+    require_app_user(payload.user_id)
     user = db.query(User).filter(User.id == payload.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -500,6 +501,7 @@ def get_chat_history(
     session_id: str = Query(...),
     db: Session = Depends(get_db),
 ):
+    require_app_user(user_id)
     session = db.query(SessionModel).filter(
         SessionModel.id == session_id,
         SessionModel.user_id == user_id,
