@@ -41,6 +41,7 @@
   - [x] 普通请求与 SSE 请求均携带认证头。
   - [x] FastAPI 与 Gradio 默认绑定 `127.0.0.1`，外部监听要求 token。
   - [ ] 手动验证上传、两种问答、切换和删除会话。
+  - [x] 使用隔离测试用户完成真实 API 上传、normal/deep、切换读取和删除联调。
   - [x] 运行 `pytest tests/test_frontend_client.py tests/test_auth.py -q`。
 - [ ] Checkpoint B：全量测试、`pip check`、认证和资源失败路径验证（自动化部分完成，待浏览器验收）。
   - [x] 全量测试和 `pip check` 通过。
@@ -65,7 +66,13 @@
   - [x] 补齐代码实际使用的 LangChain 拆分包依赖声明。
   - [x] README 更新架构、恢复策略、安全边界、实测证据和简历表述。
   - [x] 文档明确小样本评测与 Gradio 外部监听的限制。
-- [ ] Checkpoint C：全新环境验证、演示验证、安全复审和简历表述复审。
+- [ ] Checkpoint C：全新环境验证、演示验证、安全复审和简历表述复审（自动化与真实 API 完成，待浏览器和托管 CI）。
+  - [x] 99 项测试、`pip check`、源码编译和离线评测通过。
+  - [x] 本地 MySQL/Redis/Chroma/DeepSeek 完成隔离式真实联调并清理测试数据。
+  - [x] normal/deep、上传/删除、双会话列表/切换读取均验证成功。
+  - [x] 完成日志脱敏、配置边界、Git 敏感模式和最终差异复审。
+  - [ ] 使用浏览器交互验收 Gradio 全流程（当前未配置 Chrome DevTools MCP）。
+  - [ ] push 后确认 GitHub Actions 首次运行成功。
 
 ## 每个 Task 的统一完成条件
 
