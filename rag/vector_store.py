@@ -84,4 +84,4 @@ def add_documents_to_rag(
 def delete_documents_by_mysql_id(mysql_id: str):
     """通过 mysql_id 删除 RAG 文档库中的向量"""
     vs = get_rag_vector_store()
-    vs.delete(filter={"mysql_id": mysql_id})
+    vs.delete(where={"mysql_id": mysql_id})

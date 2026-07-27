@@ -103,3 +103,17 @@ def test_filter_by_relevance_all_filtered():
     ]
     result = _filter_by_relevance(docs, threshold=0.5)
     assert result == []
+
+
+def test_delete_documents_uses_chroma_where_contract(monkeypatch):
+    """langchain-chroma 删除 metadata 必须使用底层支持的 where 参数。"""
+    from unittest.mock import MagicMock
+
+    from rag import vector_store
+
+    store = MagicMock()
+    monkeypatch.setattr(vector_store, "get_rag_vector_store", lambda: store)
+
+    vector_store.delete_documents_by_mysql_id("doc-1")
+
+    store.delete.assert_called_once_with(where={"mysql_id": "doc-1"})
