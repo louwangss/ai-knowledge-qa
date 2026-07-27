@@ -37,10 +37,11 @@
   - [x] 其他 `user_id` 无法访问资源。
   - [x] 日志、响应、SSE 和 OpenAPI 不泄露 token。
   - [x] 运行 `pytest tests/test_auth.py tests/test_api.py -q`。
-- [ ] Task 6：前端统一携带 token，服务默认绑定 `127.0.0.1`。
-  - [ ] 普通请求与 SSE 请求均携带认证头。
+- [ ] Task 6：前端统一携带 token，服务默认绑定 `127.0.0.1`（代码完成，待浏览器手动验收）。
+  - [x] 普通请求与 SSE 请求均携带认证头。
+  - [x] FastAPI 与 Gradio 默认绑定 `127.0.0.1`，外部监听要求 token。
   - [ ] 手动验证上传、两种问答、切换和删除会话。
-  - [ ] 运行 `pytest tests/test_frontend_client.py tests/test_auth.py -q`。
+  - [x] 运行 `pytest tests/test_frontend_client.py tests/test_auth.py -q`。
 - [ ] Checkpoint B：全量测试、`pip check`、认证和资源失败路径验证。
 
 ## Phase 3：简历项目证据

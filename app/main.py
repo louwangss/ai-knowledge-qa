@@ -16,6 +16,7 @@ from app.api.routes_notes import router as notes_router
 from app.api.routes_chat import router as chat_router
 from app.deps import require_access_token
 from app.error_handler import value_error_handler, generic_error_handler
+from config import API_HOST
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -66,6 +67,12 @@ def root():
     return {"status": "ok", "service": "AI Knowledge QA"}
 
 
-if __name__ == "__main__":
+def run_api():
+    """使用配置的监听地址启动开发 API 服务。"""
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+
+    uvicorn.run("app.main:app", host=API_HOST, port=8000, reload=True)
+
+
+if __name__ == "__main__":
+    run_api()

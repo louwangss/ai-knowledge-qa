@@ -9,36 +9,61 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 import gradio as gr
+from dotenv import load_dotenv
 
+load_dotenv()
 API_URL = os.getenv("API_URL", "http://localhost:8000")
+APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "").strip()
+GRADIO_HOST = os.getenv("GRADIO_HOST", "127.0.0.1").strip()
 DEFAULT_USER_ID = "default-user"  # 单用户 MVP
 
 
 # ---- API 调用 ----
 
+def validate_frontend_config(access_token: str, server_name: str) -> None:
+    """前端必须持有 API token，监听地址也不能为空。"""
+    if not access_token:
+        raise RuntimeError("环境变量 APP_ACCESS_TOKEN 未设置")
+    if not server_name:
+        raise RuntimeError("环境变量 GRADIO_HOST 不能为空")
+
+
+validate_frontend_config(APP_ACCESS_TOKEN, GRADIO_HOST)
+
+
+def _api_client(timeout=None) -> httpx.AsyncClient:
+    """创建统一携带认证头的 API 客户端。"""
+    kwargs = {
+        "headers": {"Authorization": f"Bearer {APP_ACCESS_TOKEN}"},
+    }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return httpx.AsyncClient(**kwargs)
+
+
 async def api_create_user() -> str:
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.post(f"{API_URL}/api/v1/users", json={"username": "user"})
         resp.raise_for_status()
         return resp.json()["id"]
 
 
 async def api_create_session(user_id: str) -> str:
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.post(f"{API_URL}/api/v1/sessions", json={"user_id": user_id})
         resp.raise_for_status()
         return resp.json()["id"]
 
 
 async def api_list_sessions(user_id: str) -> list[dict]:
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.get(f"{API_URL}/api/v1/sessions", params={"user_id": user_id})
         resp.raise_for_status()
         return resp.json()
 
 
 async def api_delete_session(user_id: str, session_id: str) -> str:
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.delete(
             f"{API_URL}/api/v1/sessions/{session_id}",
             params={"user_id": user_id},
@@ -48,7 +73,7 @@ async def api_delete_session(user_id: str, session_id: str) -> str:
 
 
 async def api_get_chat_history(user_id: str, session_id: str) -> list[dict]:
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.get(
             f"{API_URL}/api/v1/chat/history",
             params={"user_id": user_id, "session_id": session_id},
@@ -58,7 +83,7 @@ async def api_get_chat_history(user_id: str, session_id: str) -> list[dict]:
 
 
 async def api_upload_document(user_id: str, file) -> str:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+    async with _api_client(timeout=httpx.Timeout(60.0)) as client:
         with open(file.name, "rb") as f:
             resp = await client.post(
                 f"{API_URL}/api/v1/documents",
@@ -73,7 +98,7 @@ async def api_upload_document(user_id: str, file) -> str:
 
 
 async def api_list_documents(user_id: str) -> list[list]:
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.get(f"{API_URL}/api/v1/documents", params={"user_id": user_id})
         resp.raise_for_status()
         docs = resp.json()
@@ -83,7 +108,7 @@ async def api_list_documents(user_id: str) -> list[list]:
 async def api_delete_document(user_id: str, doc_id: str) -> str:
     if not doc_id or doc_id == "无":
         return "请先选择文档"
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.delete(
             f"{API_URL}/api/v1/documents/{doc_id}",
             params={"user_id": user_id},
@@ -94,7 +119,7 @@ async def api_delete_document(user_id: str, doc_id: str) -> str:
 
 async def api_list_notes(user_id: str) -> list[tuple]:
     """获取笔记列表，返回 Radio 选项 [(label, value), ...]"""
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.get(f"{API_URL}/api/v1/notes", params={"user_id": user_id})
         resp.raise_for_status()
         notes = resp.json()
@@ -103,7 +128,7 @@ async def api_list_notes(user_id: str) -> list[tuple]:
 
 async def api_save_note(user_id: str, concept: str, content: str, note_id) -> tuple[str, int | None]:
     """返回 (状态消息, 笔记ID)"""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+    async with _api_client(timeout=httpx.Timeout(60.0)) as client:
         if note_id:
             resp = await client.put(
                 f"{API_URL}/api/v1/notes/{note_id}",
@@ -129,7 +154,7 @@ async def api_save_note(user_id: str, concept: str, content: str, note_id) -> tu
 async def api_delete_note(user_id: str, note_id) -> str:
     if not note_id:
         return "请先选择笔记"
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.delete(
             f"{API_URL}/api/v1/notes/{note_id}",
             params={"user_id": user_id},
@@ -140,7 +165,7 @@ async def api_delete_note(user_id: str, note_id) -> str:
 
 async def api_get_documents_dropdown(user_id: str) -> dict:
     """获取文档下拉选项"""
-    async with httpx.AsyncClient() as client:
+    async with _api_client() as client:
         resp = await client.get(f"{API_URL}/api/v1/documents", params={"user_id": user_id})
         resp.raise_for_status()
         docs = resp.json()
@@ -201,7 +226,7 @@ async def chat_fn(message, history, mode, user_id, session_id):
 
     yield chatbot_history, "", ""  # 先显示用户消息
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+    async with _api_client(timeout=httpx.Timeout(120.0)) as client:
         async with client.stream(
             "POST",
             f"{API_URL}/api/v1/chat",
@@ -262,8 +287,8 @@ async def init_app():
 
         return (user_id, session_id, docs, doc_choices,
                 gr.update(choices=session_items, value=session_id), chatbot_init, "就绪")
-    except Exception as e:
-        return ("", "", [], gr.update(), gr.update(), [], f"初始化失败: {e}")
+    except Exception:
+        return ("", "", [], gr.update(), gr.update(), [], "初始化失败，请检查后端服务和认证配置")
 
 
 # ---- Gradio 界面 ----
@@ -442,7 +467,7 @@ def build_ui():
                 return None, "", "", "", ""
             if note_id_val == -1:
                 return None, "", "", "新笔记，开始输入即可保存", "|||"
-            async with httpx.AsyncClient() as client:
+            async with _api_client() as client:
                 resp = await client.get(f"{API_URL}/api/v1/notes", params={"user_id": user_id})
                 resp.raise_for_status()
                 notes = resp.json()
@@ -613,6 +638,11 @@ def build_ui():
     return app
 
 
-if __name__ == "__main__":
+def run_frontend():
+    """使用配置的监听地址启动 Gradio。"""
     ui = build_ui()
-    ui.launch(server_name="0.0.0.0", server_port=7860)
+    ui.launch(server_name=GRADIO_HOST, server_port=7860)
+
+
+if __name__ == "__main__":
+    run_frontend()
