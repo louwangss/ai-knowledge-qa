@@ -85,3 +85,12 @@ def delete_documents_by_mysql_id(mysql_id: str):
     """通过 mysql_id 删除 RAG 文档库中的向量"""
     vs = get_rag_vector_store()
     vs.delete(where={"mysql_id": mysql_id})
+
+
+def delete_semantic_vectors_by_mysql_id(mysql_id: str) -> None:
+    """直接删除笔记向量；删除操作不初始化 Embedding 模型。"""
+    collection = _get_chroma_client().get_or_create_collection(
+        name=SEMANTIC_COLLECTION,
+        embedding_function=None,
+    )
+    collection.delete(where={"mysql_id": mysql_id})

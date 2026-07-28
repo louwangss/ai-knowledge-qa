@@ -97,22 +97,20 @@ def update_note(
 
 
 def delete_note(db: Session, note_id: int, user_id: str) -> bool:
-    """删除笔记"""
-    note = db.query(SemanticMemory).filter(
-        SemanticMemory.id == note_id,
-        SemanticMemory.user_id == user_id,
-    ).first()
-    if not note:
-        return False
+    """同步清理派生向量后删除 MySQL 权威记录。"""
+    with _NOTE_SYNC_LOCKS[note_id]:
+        note = db.query(SemanticMemory).filter(
+            SemanticMemory.id == note_id,
+            SemanticMemory.user_id == user_id,
+        ).first()
+        if not note:
+            return False
 
-    # 按 mysql_id 清理全部历史向量，兼容旧版随机 ID 与失败遗留的重复项。
-    try:
+        # 清理失败时保留 MySQL 记录，避免留下仍可被检索的孤立向量。
         _delete_note_vectors(note.id)
-    except Exception as e:
-        logger.warning("删除向量失败: error_type=%s", type(e).__name__)
 
-    db.delete(note)
-    db.commit()
+        db.delete(note)
+        db.commit()
     return True
 
 
@@ -173,11 +171,9 @@ def _sync_to_chroma(db: Session, note: SemanticMemory):
 
 def _delete_note_vectors(note_id: int) -> None:
     """删除同一 MySQL 笔记对应的所有 Chroma 向量。"""
-    vs = get_semantic_vector_store()
-    existing = vs.get(where={"mysql_id": str(note_id)})
-    existing_ids = list(existing.get("ids", [])) if existing else []
-    if existing_ids:
-        vs.delete(ids=existing_ids)
+    from rag.vector_store import delete_semantic_vectors_by_mysql_id
+
+    delete_semantic_vectors_by_mysql_id(str(note_id))
 
 
 def sync_note_index_task(note_id: int, user_id: str) -> None:

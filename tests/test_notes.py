@@ -124,3 +124,44 @@ def test_sync_to_chroma_uses_stable_id_and_removes_legacy_vectors(db_session):
     assert vector_store.added["ids"] == [stable_id]
     assert vector_store.deleted == ["legacy-vector-id"]
     assert note.chroma_id == stable_id
+
+
+def test_delete_semantic_vectors_does_not_load_embeddings(monkeypatch):
+    from rag import vector_store
+
+    deleted = {}
+
+    class FakeCollection:
+        def delete(self, **kwargs):
+            deleted.update(kwargs)
+
+    class FakeClient:
+        def get_or_create_collection(self, name, embedding_function):
+            assert name == vector_store.SEMANTIC_COLLECTION
+            assert embedding_function is None
+            return FakeCollection()
+
+    monkeypatch.setattr(vector_store, "_get_chroma_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        vector_store,
+        "get_embeddings",
+        lambda: (_ for _ in ()).throw(AssertionError("删除向量不应加载 Embedding")),
+    )
+
+    vector_store.delete_semantic_vectors_by_mysql_id("42")
+
+    assert deleted == {"where": {"mysql_id": "42"}}
+
+
+def test_delete_note_keeps_mysql_record_when_vector_cleanup_fails(db_session):
+    note = semantic.create_note(db_session, "u1", "标题", "正文")
+
+    with patch.object(
+        semantic,
+        "_delete_note_vectors",
+        side_effect=RuntimeError("Chroma unavailable"),
+    ):
+        with pytest.raises(RuntimeError, match="Chroma unavailable"):
+            semantic.delete_note(db_session, note.id, "u1")
+
+    assert db_session.get(SemanticMemory, note.id) is not None
