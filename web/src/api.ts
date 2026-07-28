@@ -1,4 +1,13 @@
-import type { ApiErrorBody, Note, NoteSummary } from "./types";
+import { parseSseStream } from "./chatSse";
+import type {
+  ApiErrorBody,
+  ChatHistoryMessage,
+  ChatMode,
+  ChatStreamEvent,
+  Note,
+  NoteSummary,
+  SessionSummary,
+} from "./types";
 
 const API_ROOT = "/api/v1";
 
@@ -83,4 +92,47 @@ export async function deleteNote(userId: string, noteId: number): Promise<void> 
   await request(`/notes/${noteId}?user_id=${encodeURIComponent(userId)}`, {
     method: "DELETE",
   });
+}
+
+export async function listSessions(userId: string): Promise<SessionSummary[]> {
+  return request(`/sessions?user_id=${encodeURIComponent(userId)}`);
+}
+
+export async function createSession(userId: string): Promise<SessionSummary> {
+  return request("/sessions", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
+}
+
+export async function deleteSession(userId: string, sessionId: string): Promise<void> {
+  await request(`/sessions/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getChatHistory(
+  userId: string,
+  sessionId: string,
+): Promise<ChatHistoryMessage[]> {
+  return request(`/chat/history?user_id=${encodeURIComponent(userId)}&session_id=${encodeURIComponent(sessionId)}`);
+}
+
+export async function* streamChat(
+  userId: string,
+  sessionId: string,
+  message: string,
+  mode: ChatMode,
+  signal?: AbortSignal,
+): AsyncGenerator<ChatStreamEvent> {
+  const response = await fetch(`${API_ROOT}/chat`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, session_id: sessionId, message, mode }),
+    signal,
+  });
+  if (!response.ok) throw new ApiError(response.status);
+  if (!response.body) throw new Error("浏览器未提供流式响应");
+  yield* parseSseStream(response.body);
 }
