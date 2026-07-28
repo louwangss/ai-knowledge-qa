@@ -25,6 +25,11 @@ def test_all_frontend_requests_include_bearer_token(tmp_path, monkeypatch):
             return httpx.Response(200, json=[])
         if path == "/api/v1/chat/history":
             return httpx.Response(200, json=[])
+        if path == "/api/v1/bootstrap":
+            return httpx.Response(
+                200,
+                json={"documents": [], "sessions": [], "notes": [], "history": []},
+            )
         if path == "/api/v1/documents" and method == "POST":
             return httpx.Response(
                 200,
@@ -77,6 +82,7 @@ def test_all_frontend_requests_include_bearer_token(tmp_path, monkeypatch):
         await frontend_app.api_save_note("u1", "标题", "更新", 1)
         await frontend_app.api_delete_note("u1", 1)
         await frontend_app.api_get_documents_dropdown("u1")
+        await frontend_app.api_get_bootstrap("u1")
         async for _ in frontend_app.chat_fn(
             "问题",
             [],
@@ -88,7 +94,7 @@ def test_all_frontend_requests_include_bearer_token(tmp_path, monkeypatch):
 
     asyncio.run(exercise_all_requests())
 
-    assert len(captured_requests) == 14
+    assert len(captured_requests) == 15
     assert {
         request.headers.get("authorization") for request in captured_requests
     } == {"Bearer test-access-token"}
@@ -114,7 +120,7 @@ def test_frontend_initialization_loads_first_screen_data_in_one_stage(monkeypatc
 
     started = set()
     all_started = asyncio.Event()
-    first_stage = {"user", "documents", "sessions", "notes"}
+    first_stage = {"user", "bootstrap"}
 
     async def finish_first_stage(name, value):
         started.add(name)
@@ -126,40 +132,24 @@ def test_frontend_initialization_loads_first_screen_data_in_one_stage(monkeypatc
     async def fake_create_user():
         return await finish_first_stage("user", "u1")
 
-    async def fake_fetch_documents(user_id):
+    async def fake_get_bootstrap(user_id):
         assert user_id == "u1"
         return await finish_first_stage(
-            "documents",
-            [{"id": "document-1", "filename": "知识.md", "chunk_count": 2,
-              "created_at": "2026-07-28T00:00:00"}],
+            "bootstrap",
+            {
+                "documents": [
+                    {"id": "document-1", "filename": "知识.md", "chunk_count": 2,
+                     "created_at": "2026-07-28T00:00:00"},
+                ],
+                "sessions": [{"id": "session-1", "title": "已有会话"}],
+                "notes": [{"id": 1, "concept": "笔记"}],
+                "history": [{"role": "user", "content": "历史问题"}],
+            },
         )
-
-    async def fake_list_sessions(user_id):
-        assert user_id == "u1"
-        return await finish_first_stage(
-            "sessions",
-            [{"id": "session-1", "title": "已有会话"}],
-        )
-
-    async def fake_list_notes(user_id):
-        assert user_id == "u1"
-        return await finish_first_stage("notes", [("笔记", 1)])
-
-    async def fake_history(user_id, session_id):
-        assert (user_id, session_id) == ("u1", "session-1")
-        return [{"role": "user", "content": "历史问题"}]
 
     monkeypatch.setattr(frontend_app, "APP_USER_ID", "u1", raising=False)
     monkeypatch.setattr(frontend_app, "api_create_user", fake_create_user)
-    monkeypatch.setattr(
-        frontend_app,
-        "_api_fetch_documents",
-        fake_fetch_documents,
-        raising=False,
-    )
-    monkeypatch.setattr(frontend_app, "api_list_sessions", fake_list_sessions)
-    monkeypatch.setattr(frontend_app, "api_list_notes", fake_list_notes)
-    monkeypatch.setattr(frontend_app, "api_get_chat_history", fake_history)
+    monkeypatch.setattr(frontend_app, "api_get_bootstrap", fake_get_bootstrap, raising=False)
 
     result = asyncio.run(asyncio.wait_for(frontend_app.init_app(), timeout=1.0))
 
@@ -172,6 +162,18 @@ def test_frontend_initialization_loads_first_screen_data_in_one_stage(monkeypatc
     assert result[6]["choices"] == [("笔记", 1)]
     assert result[7] == [("笔记", 1)]
     assert result[8] == "就绪"
+
+
+def test_session_switch_only_runs_for_user_input():
+    from frontend import app as frontend_app
+
+    ui = frontend_app.build_ui()
+    dependency = next(
+        item for item in ui.config["dependencies"]
+        if item["api_name"] == "on_switch_session"
+    )
+
+    assert dependency["targets"][0][1] == "input"
 
 
 def test_default_bind_hosts_are_loopback():

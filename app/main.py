@@ -14,6 +14,7 @@ from app.api.routes_sessions import router as sessions_router
 from app.api.routes_documents import router as documents_router
 from app.api.routes_notes import router as notes_router
 from app.api.routes_chat import router as chat_router
+from app.api.routes_bootstrap import router as bootstrap_router
 from app.deps import require_access_token
 from app.error_handler import value_error_handler, generic_error_handler
 from app.observability import RequestObservabilityMiddleware
@@ -58,6 +59,7 @@ app.include_router(sessions_router, dependencies=_protected_dependencies)
 app.include_router(documents_router, dependencies=_protected_dependencies)
 app.include_router(notes_router, dependencies=_protected_dependencies)
 app.include_router(chat_router, dependencies=_protected_dependencies)
+app.include_router(bootstrap_router, dependencies=_protected_dependencies)
 
 # 错误处理
 app.add_exception_handler(ValueError, value_error_handler)

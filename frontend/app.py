@@ -106,6 +106,17 @@ async def _api_fetch_documents(user_id: str) -> list[dict]:
         return resp.json()
 
 
+async def api_get_bootstrap(user_id: str) -> dict:
+    """一次获取 Gradio 首屏所需的只读数据。"""
+    async with _api_client() as client:
+        resp = await client.get(
+            f"{API_URL}/api/v1/bootstrap",
+            params={"user_id": user_id},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 def _documents_table(docs: list[dict]) -> list[list]:
     return [[d["filename"], d.get("chunk_count", 0), d["created_at"]] for d in docs]
 
@@ -274,13 +285,17 @@ async def chat_fn(message, history, mode, user_id, session_id):
 async def init_app():
     """页面加载时创建用户，加载会话列表和最近会话的聊天记录"""
     try:
-        # 单用户 ID 来自同一份环境配置，读取请求无需等待幂等的用户创建完成。
-        user_id, document_data, sessions, notes = await asyncio.gather(
+        # 用户创建是幂等写；首屏只读快照可使用同一固定 ID 与其并行。
+        user_id, bootstrap = await asyncio.gather(
             api_create_user(),
-            _api_fetch_documents(APP_USER_ID),
-            api_list_sessions(APP_USER_ID),
-            api_list_notes(APP_USER_ID),
+            api_get_bootstrap(APP_USER_ID),
         )
+        document_data = bootstrap["documents"]
+        sessions = bootstrap["sessions"]
+        notes = [
+            (note.get("concept") or "无标题", note["id"])
+            for note in bootstrap["notes"]
+        ]
         docs = _documents_table(document_data)
         doc_choices = _documents_dropdown(document_data)
 
@@ -289,7 +304,7 @@ async def init_app():
         # 有会话则选最近的，没有则创建
         if sessions:
             session_id = sessions[0]["id"]
-            history = await api_get_chat_history(user_id, session_id)
+            history = bootstrap["history"]
             chatbot_init = [{"role": h["role"], "content": h["content"]} for h in history]
         else:
             session_id = await api_create_session(user_id)
@@ -339,7 +354,6 @@ def build_ui():
         user_id_state = gr.State("")
         session_id_state = gr.State("")
         note_id_state = gr.State(None)
-        _first_load = gr.State(True)  # 跳过首次 session_dropdown.change
         _expected_content = gr.State("")  # 加载笔记时记录内容快照，防误触发 auto_save
         _notes_choices = gr.State([])  # 当前笔记列表选项
 
@@ -595,20 +609,17 @@ def build_ui():
         )
 
         # 切换会话（加载历史记录 + 同步 session_id_state）
-        async def on_switch_session(session_id, user_id, is_first):
-            if is_first:
-                # 初始化时 init_app 已加载聊天记录，跳过重复请求
-                return session_id, gr.update(), False, gr.update()
+        async def on_switch_session(session_id, user_id):
             if not session_id or not user_id:
-                return "", [], False, "已切换会话"
+                return "", [], "已切换会话"
             history = await api_get_chat_history(user_id, session_id)
             chatbot_data = [{"role": h["role"], "content": h["content"]} for h in history]
-            return session_id, chatbot_data, False, "已切换会话"
+            return session_id, chatbot_data, "已切换会话"
 
-        session_dropdown.change(
+        session_dropdown.input(
             on_switch_session,
-            inputs=[session_dropdown, user_id_state, _first_load],
-            outputs=[session_id_state, chatbot, _first_load, status_md],
+            inputs=[session_dropdown, user_id_state],
+            outputs=[session_id_state, chatbot, status_md],
         )
 
         # 点击删除按钮 → 显示确认/取消
