@@ -16,6 +16,40 @@ AUTH_HEADERS = {"Authorization": "Bearer test-access-token"}
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+class FakeSessionRedis:
+    def __init__(self):
+        self.values = {}
+        self.expirations = {}
+
+    def set(self, key, value, ex=None):
+        self.values[key] = value
+        self.expirations[key] = ex
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def exists(self, key):
+        return int(key in self.values)
+
+    def incr(self, key):
+        value = int(self.values.get(key, 0)) + 1
+        self.values[key] = value
+        return value
+
+    def expire(self, key, seconds):
+        if key not in self.values:
+            return False
+        self.expirations[key] = seconds
+        return True
+
+    def delete(self, key):
+        existed = key in self.values
+        self.values.pop(key, None)
+        self.expirations.pop(key, None)
+        return int(existed)
+
+
 @pytest.fixture
 def mock_db():
     db = MagicMock()
@@ -220,13 +254,42 @@ def test_config_rejects_app_user_id_longer_than_database_column():
     assert "APP_USER_ID 长度不能超过 36" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "APP_WEB_SESSION_TTL_SECONDS",
+        "APP_WEB_LOGIN_MAX_ATTEMPTS",
+        "APP_WEB_LOGIN_WINDOW_SECONDS",
+    ],
+)
+def test_config_rejects_non_positive_web_auth_limits(name):
+    env = os.environ.copy()
+    env[name] = "0"
+    env["PYTHONUTF8"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import config"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode != 0
+    assert f"环境变量 {name} 必须为正整数" in completed.stderr
+
+
 def test_loopback_bootstrap_creates_httponly_web_session(monkeypatch, mock_db):
     from app.deps import get_db
     from app.main import app
-    from app.web_auth import clear_web_sessions_for_test
+    from app.web_auth import clear_web_auth_process_state_for_test
 
     monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
-    clear_web_sessions_for_test()
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+    clear_web_auth_process_state_for_test()
 
     def override_get_db():
         yield mock_db
@@ -246,6 +309,7 @@ def test_loopback_bootstrap_creates_httponly_web_session(monkeypatch, mock_db):
             cookie = login.headers["set-cookie"].lower()
             assert "httponly" in cookie
             assert "samesite=strict" in cookie
+            assert "max-age=" in cookie
             assert "single-use-bootstrap" not in cookie
             assert web_client.get("/api/v1/web/session/status").json() == {
                 "authenticated": True
@@ -260,17 +324,95 @@ def test_loopback_bootstrap_creates_httponly_web_session(monkeypatch, mock_db):
             assert config_response.status_code == 200
             assert config_response.json() == {"user_id": "u1"}
     finally:
-        clear_web_sessions_for_test()
+        clear_web_auth_process_state_for_test()
         app.dependency_overrides.clear()
+
+
+def test_web_session_survives_backend_process_state_reset(monkeypatch):
+    from app.main import app
+    from app.web_auth import clear_web_auth_process_state_for_test
+
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+    clear_web_auth_process_state_for_test()
+
+    with TestClient(app, client=("127.0.0.1", 51000)) as first_process:
+        login = first_process.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "test-access-token"},
+        )
+        assert login.status_code == 204
+        session_cookie = first_process.cookies.get("ai_knowledge_web_session")
+
+    clear_web_auth_process_state_for_test()
+    with TestClient(app, client=("127.0.0.1", 51001)) as restarted_process:
+        restarted_process.cookies.set("ai_knowledge_web_session", session_cookie)
+        assert restarted_process.get("/api/v1/web/session/status").json() == {
+            "authenticated": True
+        }
+
+
+def test_web_session_logout_revokes_server_session_and_cookie(monkeypatch):
+    from app.main import app
+
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+
+    with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+        assert web_client.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "test-access-token"},
+        ).status_code == 204
+
+        logout = web_client.delete(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+        )
+
+        assert logout.status_code == 204
+        assert "max-age=0" in logout.headers["set-cookie"].lower()
+        assert web_client.get("/api/v1/web/session/status").json() == {
+            "authenticated": False
+        }
+
+
+def test_web_session_rate_limits_repeated_invalid_credentials(monkeypatch):
+    from app.main import app
+    from config import WEB_LOGIN_MAX_ATTEMPTS
+
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+
+    with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+        for _ in range(WEB_LOGIN_MAX_ATTEMPTS):
+            response = web_client.post(
+                "/api/v1/web/session",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"token": "wrong-token"},
+            )
+            assert response.status_code == 401
+
+        blocked = web_client.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "test-access-token"},
+        )
+
+        assert blocked.status_code == 429
+        assert blocked.headers["retry-after"]
 
 
 def test_cookie_write_rejects_untrusted_origin(monkeypatch, mock_db):
     from app.deps import get_db
     from app.main import app
-    from app.web_auth import clear_web_sessions_for_test
+    from app.web_auth import clear_web_auth_process_state_for_test
 
     monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
-    clear_web_sessions_for_test()
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+    clear_web_auth_process_state_for_test()
 
     def override_get_db():
         yield mock_db
@@ -291,7 +433,7 @@ def test_cookie_write_rejects_untrusted_origin(monkeypatch, mock_db):
             )
             assert response.status_code == 403
     finally:
-        clear_web_sessions_for_test()
+        clear_web_auth_process_state_for_test()
         app.dependency_overrides.clear()
 
 

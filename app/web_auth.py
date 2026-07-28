@@ -6,13 +6,21 @@ import os
 import secrets
 
 from fastapi import HTTPException, Request, status
+from redis.exceptions import RedisError
 
-from config import APP_ACCESS_TOKEN
+from config import (
+    APP_ACCESS_TOKEN,
+    WEB_LOGIN_MAX_ATTEMPTS,
+    WEB_LOGIN_WINDOW_SECONDS,
+    WEB_SESSION_TTL_SECONDS,
+)
+from memory.short_term import get_redis
 
 
 WEB_SESSION_COOKIE = "ai_knowledge_web_session"
-_web_session_hashes: set[str] = set()
 _consumed_bootstrap_hashes: set[str] = set()
+_WEB_SESSION_KEY_PREFIX = "qa:web_session:"
+_WEB_LOGIN_ATTEMPT_KEY_PREFIX = "qa:web_login_attempts:"
 _DEFAULT_ALLOWED_ORIGINS = {
     "http://127.0.0.1:5173",
     "http://127.0.0.1:8000",
@@ -21,6 +29,53 @@ _DEFAULT_ALLOWED_ORIGINS = {
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _session_key(value: str) -> str:
+    return f"{_WEB_SESSION_KEY_PREFIX}{_digest(value)}"
+
+
+def _login_attempt_key(request: Request) -> str:
+    host = request.client.host if request.client else "unknown"
+    return f"{_WEB_LOGIN_ATTEMPT_KEY_PREFIX}{_digest(host)}"
+
+
+def _session_store_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="会话服务暂时不可用",
+    )
+
+
+def require_web_login_capacity(request: Request) -> None:
+    try:
+        attempts = get_redis().get(_login_attempt_key(request))
+    except RedisError as exc:
+        raise _session_store_unavailable() from exc
+    if attempts is not None and int(attempts) >= WEB_LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="认证尝试过于频繁，请稍后重试",
+            headers={"Retry-After": str(WEB_LOGIN_WINDOW_SECONDS)},
+        )
+
+
+def record_web_login_failure(request: Request) -> None:
+    try:
+        redis_client = get_redis()
+        key = _login_attempt_key(request)
+        attempts = redis_client.incr(key)
+        if attempts == 1:
+            redis_client.expire(key, WEB_LOGIN_WINDOW_SECONDS)
+    except RedisError as exc:
+        raise _session_store_unavailable() from exc
+
+
+def clear_web_login_failures(request: Request) -> None:
+    try:
+        get_redis().delete(_login_attempt_key(request))
+    except RedisError as exc:
+        raise _session_store_unavailable() from exc
 
 
 def is_loopback_client(request: Request) -> bool:
@@ -63,16 +118,37 @@ def exchange_web_credential(value: str) -> str:
     if is_unused_bootstrap:
         _consumed_bootstrap_hashes.add(bootstrap_hash)
     session_value = secrets.token_urlsafe(32)
-    _web_session_hashes.add(_digest(session_value))
+    try:
+        get_redis().set(
+            _session_key(session_value),
+            "active",
+            ex=WEB_SESSION_TTL_SECONDS,
+        )
+    except RedisError as exc:
+        raise _session_store_unavailable() from exc
     return session_value
 
 
 def has_valid_web_session(request: Request) -> bool:
     value = request.cookies.get(WEB_SESSION_COOKIE)
-    return bool(value) and _digest(value) in _web_session_hashes
+    if not value:
+        return False
+    try:
+        return bool(get_redis().exists(_session_key(value)))
+    except RedisError as exc:
+        raise _session_store_unavailable() from exc
 
 
-def clear_web_sessions_for_test() -> None:
+def revoke_web_session(request: Request) -> None:
+    value = request.cookies.get(WEB_SESSION_COOKIE)
+    if not value:
+        return
+    try:
+        get_redis().delete(_session_key(value))
+    except RedisError as exc:
+        raise _session_store_unavailable() from exc
+
+
+def clear_web_auth_process_state_for_test() -> None:
     """隔离测试状态；生产代码不会调用。"""
-    _web_session_hashes.clear()
     _consumed_bootstrap_hashes.clear()

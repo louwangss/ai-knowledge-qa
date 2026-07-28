@@ -65,7 +65,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .sidebar-empty svg { width: 24px; }
 .sidebar-empty p { margin: 0; }
 .chat-list-heading { margin-top: 18px; }
-.gradio-link { display: flex; justify-content: space-between; align-items: center; padding: 11px 9px 3px; border-top: 1px solid var(--line); color: #67665f; font-size: 12px; text-decoration: none; }
+.sidebar-footer-actions { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); }
+.logout-button, .gradio-link { min-height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; color: #67665f; font: inherit; font-size: 12px; text-decoration: none; }
+.logout-button { cursor: pointer; }
+.logout-button:hover { background: rgba(41, 79, 72, 0.08); color: #294f48; }
 .gradio-link:hover { color: var(--accent); }
 .gradio-link svg { width: 15px; }
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { ApiError, createWebSession, getWebConfig, getWebSessionStatus } from "./api";
+import { ApiError, createWebSession, deleteWebSession, getWebConfig, getWebSessionStatus } from "./api";
 import { ChatWorkspace } from "./components/ChatWorkspace";
 import { NotesWorkspace } from "./components/NotesWorkspace";
 import "./styles.css";
@@ -61,6 +61,18 @@ export default function App() {
     setActiveView(view);
   }
 
+  async function logout() {
+    try {
+      await deleteWebSession();
+      setUserId(null);
+      setTokenInput("");
+      setAuthError(null);
+      setAuthState("required");
+    } catch {
+      setAuthError("退出失败，请确认后端和 Redis 服务可用后重试。");
+    }
+  }
+
   if (authState === "checking") {
     return <div className="app-loading" role="status"><span className="brand-mark">知</span><p>正在打开笔记工作区…</p></div>;
   }
@@ -92,8 +104,18 @@ export default function App() {
   }
 
   if (activeView === "chat" && userId) {
-    return <ChatWorkspace userId={userId} onChangeView={changeView} />;
+    return (
+      <>
+        <ChatWorkspace userId={userId} onChangeView={changeView} onLogout={() => void logout()} />
+        {authError && <div className="toast" role="alert">{authError}</div>}
+      </>
+    );
   }
 
-  return userId ? <NotesWorkspace userId={userId} onChangeView={changeView} /> : null;
+  return userId ? (
+    <>
+      <NotesWorkspace userId={userId} onChangeView={changeView} onLogout={() => void logout()} />
+      {authError && <div className="toast" role="alert">{authError}</div>}
+    </>
+  ) : null;
 }

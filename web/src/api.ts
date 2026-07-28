@@ -50,6 +50,10 @@ export async function createWebSession(token: string): Promise<void> {
   });
 }
 
+export async function deleteWebSession(): Promise<void> {
+  await request<void>("/web/session", { method: "DELETE" });
+}
+
 export async function getWebConfig(): Promise<{ user_id: string }> {
   return request("/web/config");
 }

@@ -30,6 +30,21 @@ if len(APP_USER_ID) > 36:
 if not API_HOST:
     raise RuntimeError("环境变量 API_HOST 不能为空")
 
+
+def _positive_int_env(name: str, default: str) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError as exc:
+        raise RuntimeError(f"环境变量 {name} 必须为正整数") from exc
+    if value <= 0:
+        raise RuntimeError(f"环境变量 {name} 必须为正整数")
+    return value
+
+
+WEB_SESSION_TTL_SECONDS = _positive_int_env("APP_WEB_SESSION_TTL_SECONDS", "604800")
+WEB_LOGIN_MAX_ATTEMPTS = _positive_int_env("APP_WEB_LOGIN_MAX_ATTEMPTS", "10")
+WEB_LOGIN_WINDOW_SECONDS = _positive_int_env("APP_WEB_LOGIN_WINDOW_SECONDS", "300")
+
 # Tavily 可选（不用 web_search 时不需要）
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 

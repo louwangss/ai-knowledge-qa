@@ -7,9 +7,10 @@ import { Sidebar } from "./Sidebar";
 interface NotesWorkspaceProps {
   userId: string;
   onChangeView: (view: "chat" | "notes") => void;
+  onLogout: () => void;
 }
 
-export function NotesWorkspace({ userId, onChangeView }: NotesWorkspaceProps) {
+export function NotesWorkspace({ userId, onChangeView, onLogout }: NotesWorkspaceProps) {
   const [search, setSearch] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const workspace = useNotesWorkspace(userId);
@@ -50,6 +51,7 @@ export function NotesWorkspace({ userId, onChangeView }: NotesWorkspaceProps) {
         onCreate={() => { void workspace.createNewNote(); setSidebarOpen(false); }}
         onClose={() => setSidebarOpen(false)}
         onChangeView={onChangeView}
+        onLogout={onLogout}
       />
       <Editor
         note={workspace.activeNote}

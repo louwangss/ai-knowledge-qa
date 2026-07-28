@@ -296,4 +296,17 @@ describe("笔记工作区", () => {
     expect(screen.queryByRole("button", { name: /第一个会话/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /第二个会话/ })).toHaveAttribute("aria-current", "page");
   });
+
+  it("退出登录后撤销服务端会话并返回令牌输入页", async () => {
+    render(<App />);
+    await screen.findByDisplayValue("第一篇正文");
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+    expect(await screen.findByLabelText("访问令牌")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/web/session"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
 });

@@ -7,9 +7,10 @@ import { ChatSidebar } from "./ChatSidebar";
 interface ChatWorkspaceProps {
   userId: string;
   onChangeView: (view: "chat" | "notes") => void;
+  onLogout: () => void;
 }
 
-export function ChatWorkspace({ userId, onChangeView }: ChatWorkspaceProps) {
+export function ChatWorkspace({ userId, onChangeView, onLogout }: ChatWorkspaceProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const workspace = useChatWorkspace(userId);
 
@@ -24,6 +25,7 @@ export function ChatWorkspace({ userId, onChangeView }: ChatWorkspaceProps) {
         onCreate={() => { void workspace.createNewSession(); setSidebarOpen(false); }}
         onClose={() => setSidebarOpen(false)}
         onChangeView={onChangeView}
+        onLogout={onLogout}
       />
       <ChatPanel
         messages={workspace.activeMessages}
