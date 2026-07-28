@@ -66,11 +66,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .sidebar-empty p { margin: 0; }
 .chat-list-heading { margin-top: 18px; }
 .sidebar-footer-actions { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); }
-.logout-button, .gradio-link { min-height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; color: #67665f; font: inherit; font-size: 12px; text-decoration: none; }
+.logout-button { min-height: 32px; display: flex; justify-content: space-between; align-items: center; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; color: #67665f; font: inherit; font-size: 12px; text-decoration: none; }
 .logout-button { cursor: pointer; }
 .logout-button:hover { background: rgba(41, 79, 72, 0.08); color: #294f48; }
-.gradio-link:hover { color: var(--accent); }
-.gradio-link svg { width: 15px; }
 
 .editor-shell { height: 100vh; min-width: 0; overflow-y: auto; background: var(--surface); }
 .editor-toolbar { position: sticky; top: 0; z-index: 5; height: 58px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 0 24px; border-bottom: 1px solid rgba(222,221,214,.7); background: rgba(251,250,247,.92); backdrop-filter: blur(12px); }

@@ -11,17 +11,15 @@ def test_service_commands_use_current_python_and_project_root():
 
     services = launcher.build_services()
 
-    assert [service.name for service in services] == ["后端", "Gradio", "笔记前端"]
-    assert all(service.command[0] == sys.executable for service in services[:2])
+    assert [service.name for service in services] == ["后端", "Web 前端"]
+    assert services[0].command[0] == sys.executable
     project_root = Path(launcher.__file__).resolve().parent
-    assert all(service.cwd == project_root for service in services[:2])
+    assert services[0].cwd == project_root
     assert services[0].command[1:4] == ("-m", "uvicorn", "app.main:app")
-    assert services[1].command[1:] == ("-m", "frontend.app")
-    assert services[1].health_url == "http://127.0.0.1:7860/"
-    assert services[2].command[1:] == ("run", "dev")
-    assert services[2].cwd.name == "web"
+    assert services[1].command[1:] == ("run", "dev")
+    assert services[1].cwd.name == "web"
     assert services[0].env["APP_WEB_BOOTSTRAP_TOKEN"]
-    assert "APP_WEB_BOOTSTRAP_TOKEN" not in services[2].env
+    assert "APP_WEB_BOOTSTRAP_TOKEN" not in services[1].env
 
 
 def test_main_reuses_an_existing_complete_stack(monkeypatch):
@@ -102,10 +100,8 @@ def test_frontend_starts_while_backend_is_becoming_ready(monkeypatch):
     def fake_popen(command, cwd, env):
         if "uvicorn" in command:
             service_name = "后端"
-        elif "frontend.app" in command:
-            service_name = "Gradio"
         else:
-            service_name = "笔记前端"
+            service_name = "Web 前端"
         events.append(f"启动{service_name}")
         return FakeProcess()
 
@@ -120,8 +116,8 @@ def test_frontend_starts_while_backend_is_becoming_ready(monkeypatch):
     launcher.start_services(services)
 
     assert events == [
-        "启动后端", "启动Gradio", "启动笔记前端",
-        "等待后端就绪", "等待Gradio就绪", "等待笔记前端就绪",
+        "启动后端", "启动Web 前端",
+        "等待后端就绪", "等待Web 前端就绪",
     ]
 
 
@@ -167,11 +163,11 @@ def test_windows_entrypoint_prefers_project_virtual_environment():
     assert "launcher.py" in script
 
 
-def test_notes_url_contains_only_ephemeral_bootstrap_token():
+def test_web_url_contains_only_ephemeral_bootstrap_token():
     import launcher
 
     services = launcher.build_services(bootstrap_token="ephemeral-token")
-    url = launcher.build_notes_url(services)
+    url = launcher.build_web_url(services)
 
     assert url == "http://127.0.0.1:5173/app/#bootstrap=ephemeral-token"
     assert "test-access-token" not in url

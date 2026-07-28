@@ -1,5 +1,5 @@
 import type { SessionSummary } from "../types";
-import { ExternalIcon, MessageIcon, PlusIcon } from "./Icons";
+import { MessageIcon, PlusIcon } from "./Icons";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import type { WorkspaceView } from "./WorkspaceTabs";
 
@@ -77,9 +77,6 @@ export function ChatSidebar({
 
         <div className="sidebar-footer-actions">
           <button className="logout-button" onClick={onLogout}>退出登录</button>
-          <a className="gradio-link" href="http://127.0.0.1:7860" target="_blank" rel="noreferrer">
-            <span>打开 Gradio 备用入口</span><ExternalIcon />
-          </a>
         </div>
       </aside>
     </>

@@ -1,4 +1,4 @@
-"""统一启动 FastAPI 后端和 Gradio 前端。"""
+"""统一启动 FastAPI 后端和 React Web 前端。"""
 
 from __future__ import annotations
 
@@ -62,14 +62,7 @@ def build_services(bootstrap_token: str | None = None) -> list[Service]:
             env=backend_env,
         ),
         Service(
-            name="Gradio",
-            command=(python, "-m", "frontend.app"),
-            cwd=PROJECT_ROOT,
-            health_url="http://127.0.0.1:7860/",
-            env=shared_env.copy(),
-        ),
-        Service(
-            name="笔记前端",
+            name="Web 前端",
             command=(npm_command, "run", "dev"),
             cwd=PROJECT_ROOT / "web",
             health_url="http://127.0.0.1:5173/app/",
@@ -78,14 +71,14 @@ def build_services(bootstrap_token: str | None = None) -> list[Service]:
     ]
 
 
-def build_notes_url(services: list[Service]) -> str:
+def build_web_url(services: list[Service]) -> str:
     """构造带单次启动凭证的前端 URL；长期 access token 不进入 URL。"""
     backend = next(service for service in services if service.name == "后端")
-    notes = next(service for service in services if service.name == "笔记前端")
+    web = next(service for service in services if service.name == "Web 前端")
     token = (backend.env or {}).get("APP_WEB_BOOTSTRAP_TOKEN")
-    if not token or not notes.health_url:
-        raise RuntimeError("缺少笔记前端启动凭证")
-    return f"{notes.health_url}#bootstrap={token}"
+    if not token or not web.health_url:
+        raise RuntimeError("缺少 Web 前端启动凭证")
+    return f"{web.health_url}#bootstrap={token}"
 
 
 def is_service_ready(health_url: str) -> bool:
@@ -105,8 +98,8 @@ def get_running_stack_url(services: list[Service]) -> str | None:
     ):
         return None
 
-    notes = next(service for service in services if service.name == "笔记前端")
-    return notes.health_url
+    web = next(service for service in services if service.name == "Web 前端")
+    return web.health_url
 
 
 def wait_for_service_ready(service: Service) -> None:
@@ -194,10 +187,10 @@ def main(services: list[Service] | None = None) -> int:
 
     try:
         start_services(services)
-        notes_url = build_notes_url(services)
+        web_url = build_web_url(services)
         if should_open_browser:
-            webbrowser.open(notes_url)
-        print("[运行中] 笔记 http://127.0.0.1:5173/app/  Gradio http://127.0.0.1:7860")
+            webbrowser.open(web_url)
+        print("[运行中] Web 工作区 http://127.0.0.1:5173/app/")
         print("按 Ctrl+C 可同时关闭全部服务。")
         exited_service, exit_code = wait_for_first_exit(services)
         print(f"[退出] {exited_service.name} 已停止（退出码 {exit_code}），正在关闭其余服务。")

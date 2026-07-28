@@ -45,6 +45,13 @@ describe("文档工作区", () => {
     expect(screen.getByRole("button", { name: "文档" })).toHaveAttribute("aria-current", "page");
   });
 
+  it("主工作区不再暴露已退役的 Gradio 入口", async () => {
+    render(<App />);
+
+    await screen.findByText("rag-guide.pdf");
+    expect(screen.queryByRole("link", { name: /Gradio/ })).not.toBeInTheDocument();
+  });
+
   it("选择受支持文件后以 multipart 上传并立即加入列表", async () => {
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

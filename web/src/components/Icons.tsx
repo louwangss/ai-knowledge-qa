@@ -42,10 +42,6 @@ export function ArrowIcon(props: IconProps) {
   return <IconBase {...props}><path d="m9 18 6-6-6-6" /></IconBase>;
 }
 
-export function ExternalIcon(props: IconProps) {
-  return <IconBase {...props}><path d="M14 5h5v5M19 5l-8 8" /><path d="M17 13v6H5V7h6" /></IconBase>;
-}
-
 export function MessageIcon(props: IconProps) {
   return <IconBase {...props}><path d="M4 5.5h16v11H9l-5 3z" /><path d="M8 9h8M8 13h5" /></IconBase>;
 }

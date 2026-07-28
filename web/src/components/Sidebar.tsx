@@ -1,5 +1,5 @@
 import type { NoteSummary } from "../types";
-import { ExternalIcon, NoteIcon, PlusIcon, SearchIcon } from "./Icons";
+import { NoteIcon, PlusIcon, SearchIcon } from "./Icons";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import type { WorkspaceView } from "./WorkspaceTabs";
 
@@ -101,10 +101,6 @@ export function Sidebar({
 
         <div className="sidebar-footer-actions">
           <button className="logout-button" onClick={onLogout}>退出登录</button>
-          <a className="gradio-link" href="http://127.0.0.1:7860" target="_blank" rel="noreferrer">
-            <span>打开 Gradio 备用入口</span>
-            <ExternalIcon />
-          </a>
         </div>
       </aside>
     </>

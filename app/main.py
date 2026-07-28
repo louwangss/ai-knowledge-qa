@@ -22,6 +22,7 @@ from app.deps import require_api_access
 from app.error_handler import value_error_handler, generic_error_handler
 from app.observability import RequestObservabilityMiddleware
 from app.security_headers import SecurityHeadersMiddleware
+from app.startup import initialize_app_user
 from config import API_HOST
 
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +47,7 @@ async def _compensation_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await asyncio.to_thread(initialize_app_user)
     task = asyncio.create_task(_compensation_loop())
     logger.info("FastAPI 启动，后台补偿任务已启动")
     yield

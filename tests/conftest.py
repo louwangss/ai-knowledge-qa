@@ -20,3 +20,12 @@ os.environ.setdefault("APP_USER_ID", "u1")
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolate_real_startup_database(monkeypatch):
+    """TestClient 进入 lifespan 时不连接开发者的真实 MySQL。"""
+    monkeypatch.setattr("app.main.initialize_app_user", lambda: None)
