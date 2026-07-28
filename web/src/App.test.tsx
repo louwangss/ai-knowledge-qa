@@ -30,6 +30,16 @@ function jsonResponse(value: unknown, status = 200) {
   );
 }
 
+function sseResponse(chunks: string[]) {
+  const encoder = new TextEncoder();
+  return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
+      controller.close();
+    },
+  }), { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+}
+
 describe("笔记工作区", () => {
   beforeEach(() => {
     window.history.replaceState(null, "", "/app/");
@@ -145,5 +155,145 @@ describe("笔记工作区", () => {
     fireEvent.click(screen.getByRole("button", { name: "重试保存" }));
     expect(await screen.findByText("已保存")).toBeInTheDocument();
     expect(createAttempts).toBe(2);
+  });
+
+  it("可以进入问答工作区并加载最近会话", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/web/session/status")) return jsonResponse({ authenticated: true });
+      if (url.includes("/web/config")) return jsonResponse({ user_id: "u1" });
+      if (url.includes("/sessions")) {
+        return jsonResponse([{
+          id: "session-1",
+          user_id: "u1",
+          title: "RAG 是什么",
+          status: "active",
+          created_at: "2026-07-28T10:00:00",
+          last_active: "2026-07-28T10:00:00",
+        }]);
+      }
+      if (url.includes("/chat/history")) return jsonResponse([{
+        id: 1,
+        role: "user",
+        content: "RAG 是什么？",
+        mode: "normal",
+        created_at: "2026-07-28T10:00:00",
+      }]);
+      if (url.includes("/summaries")) return jsonResponse([]);
+      return jsonResponse({ detail: "ok" });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "问答" }));
+
+    expect(await screen.findByText("RAG 是什么？")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /RAG 是什么/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("普通问答逐块显示回答并在完成后展示来源", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/web/session/status")) return jsonResponse({ authenticated: true });
+      if (url.includes("/web/config")) return jsonResponse({ user_id: "u1" });
+      if (url.includes("/sessions")) {
+        return jsonResponse([{
+          id: "session-1",
+          user_id: "u1",
+          title: null,
+          status: "active",
+          created_at: "2026-07-28T10:00:00",
+          last_active: "2026-07-28T10:00:00",
+        }]);
+      }
+      if (url.includes("/chat/history")) return jsonResponse([]);
+      if (url.endsWith("/chat") && init?.method === "POST") {
+        return sseResponse([
+          "event: token\ndata: {\"content\":\"RAG 是\"}\n\n",
+          "event: token\ndata: {\"content\":\"检索增强生成。\"}\n\n",
+          "event: sources\ndata: {\"content\":[{\"source\":\"rag.md\",\"score\":0.1}]}\n\n",
+          "event: done\ndata: {}\n\n",
+        ]);
+      }
+      if (url.includes("/summaries")) return jsonResponse([]);
+      return jsonResponse({ detail: "ok" });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "问答" }));
+    const input = await screen.findByRole("textbox", { name: "输入问题" });
+    fireEvent.change(input, { target: { value: "解释一下 RAG" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+
+    expect(await screen.findByText("RAG 是检索增强生成。")).toBeInTheDocument();
+    expect(screen.getByText("rag.md")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/chat"),
+      expect.objectContaining({ body: expect.stringContaining('"mode":"normal"') }),
+    );
+  });
+
+  it("深度研究模式发送 deep，并显示阶段事件后的完整回答", async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/web/session/status")) return jsonResponse({ authenticated: true });
+      if (url.includes("/web/config")) return jsonResponse({ user_id: "u1" });
+      if (url.includes("/sessions")) return jsonResponse([{
+        id: "session-deep", user_id: "u1", title: "深度研究", status: "active",
+        created_at: "2026-07-28T10:00:00", last_active: "2026-07-28T10:00:00",
+      }]);
+      if (url.includes("/chat/history")) return jsonResponse([]);
+      if (url.endsWith("/chat") && init?.method === "POST") {
+        return sseResponse([
+          "event: status\ndata: {\"content\":\"正在拆解问题…\"}\n\n",
+          "event: token\ndata: {\"content\":\"研究结论\"}\n\n",
+          "event: done\ndata: {}\n\n",
+        ]);
+      }
+      if (url.includes("/summaries")) return jsonResponse([]);
+      return jsonResponse({ detail: "ok" });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "问答" }));
+    await screen.findByText("从你的资料里找到答案");
+    fireEvent.click(screen.getByRole("button", { name: "深度研究" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "输入问题" }), { target: { value: "研究 RAG 架构" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+
+    expect(await screen.findByText("研究结论")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/chat"),
+      expect.objectContaining({ body: expect.stringContaining('"mode":"deep"') }),
+    );
+  });
+
+  it("删除会话后立即切换到下一会话", async () => {
+    const sessions = [
+      { id: "s1", user_id: "u1", title: "第一个会话", status: "active", created_at: "2026-07-28T10:00:00", last_active: "2026-07-28T11:00:00" },
+      { id: "s2", user_id: "u1", title: "第二个会话", status: "active", created_at: "2026-07-28T09:00:00", last_active: "2026-07-28T10:00:00" },
+    ];
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/web/session/status")) return jsonResponse({ authenticated: true });
+      if (url.includes("/web/config")) return jsonResponse({ user_id: "u1" });
+      if (url.includes("/sessions/s1") && init?.method === "DELETE") return jsonResponse({ detail: "删除成功" });
+      if (url.includes("/sessions")) return jsonResponse(sessions);
+      if (url.includes("/chat/history")) return jsonResponse([]);
+      if (url.includes("/summaries")) return jsonResponse([]);
+      return jsonResponse({ detail: "ok" });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "问答" }));
+    expect(await screen.findByRole("button", { name: /第一个会话/ })).toHaveAttribute("aria-current", "page");
+    fireEvent.click(screen.getByRole("button", { name: "删除当前会话" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/sessions/s1"),
+      expect.objectContaining({ method: "DELETE" }),
+    ));
+    expect(screen.queryByRole("button", { name: /第一个会话/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /第二个会话/ })).toHaveAttribute("aria-current", "page");
   });
 });

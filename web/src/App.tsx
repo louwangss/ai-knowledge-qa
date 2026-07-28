@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApiError, createWebSession, getWebConfig, getWebSessionStatus } from "./api";
-import { Editor } from "./components/Editor";
-import { Sidebar } from "./components/Sidebar";
-import { useNotesWorkspace } from "./useNotesWorkspace";
+import { ChatWorkspace } from "./components/ChatWorkspace";
+import { NotesWorkspace } from "./components/NotesWorkspace";
 import "./styles.css";
 
 type AuthState = "checking" | "required" | "ready";
+type ActiveView = "chat" | "notes";
+
+function initialView(): ActiveView {
+  return new URLSearchParams(window.location.search).get("view") === "chat" ? "chat" : "notes";
+}
 
 function takeBootstrapToken() {
   const params = new URLSearchParams(window.location.hash.slice(1));
@@ -20,10 +24,8 @@ export default function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [tokenInput, setTokenInput] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activeView, setActiveView] = useState<ActiveView>(initialView);
   const authStartedRef = useRef(false);
-  const workspace = useNotesWorkspace(userId);
 
   async function finishAuthentication(token?: string | null) {
     try {
@@ -51,28 +53,13 @@ export default function App() {
     void finishAuthentication(takeBootstrapToken());
   }, []);
 
-  useEffect(() => {
-    const handleShortcut = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
-      if (event.key.toLowerCase() === "n") {
-        event.preventDefault();
-        void workspace.createNewNote();
-      }
-      if (event.key.toLowerCase() === "s") {
-        event.preventDefault();
-        workspace.saveNow();
-      }
-    };
-    window.addEventListener("keydown", handleShortcut);
-    return () => window.removeEventListener("keydown", handleShortcut);
-  }, [workspace]);
-
-  const visibleSummaries = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase("zh-CN");
-    if (!query) return workspace.summaries;
-    return workspace.summaries.filter((note) => (note.concept || "无标题笔记")
-      .toLocaleLowerCase("zh-CN").includes(query));
-  }, [search, workspace.summaries]);
+  function changeView(view: ActiveView) {
+    const url = new URL(window.location.href);
+    if (view === "chat") url.searchParams.set("view", "chat");
+    else url.searchParams.delete("view");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+    setActiveView(view);
+  }
 
   if (authState === "checking") {
     return <div className="app-loading" role="status"><span className="brand-mark">知</span><p>正在打开笔记工作区…</p></div>;
@@ -104,35 +91,9 @@ export default function App() {
     );
   }
 
-  return (
-    <div className="workspace">
-      <Sidebar
-        summaries={visibleSummaries}
-        selectedId={workspace.selectedId}
-        search={search}
-        isOpen={sidebarOpen}
-        isCreating={workspace.isCreating}
-        onSearch={setSearch}
-        onSelect={(id) => { workspace.selectNote(id); setSidebarOpen(false); }}
-        onCreate={() => { void workspace.createNewNote(); setSidebarOpen(false); }}
-        onClose={() => setSidebarOpen(false)}
-      />
-      <Editor
-        note={workspace.activeNote}
-        isLoading={workspace.isLoading}
-        onEdit={workspace.editSelected}
-        onDelete={() => void workspace.removeSelected()}
-        onRetry={workspace.retrySave}
-        onLoadServer={workspace.loadServerVersion}
-        onForceSave={workspace.forceSave}
-        onOpenSidebar={() => setSidebarOpen(true)}
-      />
-      {workspace.error && (
-        <div className="toast" role="alert">
-          <span>{workspace.error}</span>
-          <button onClick={workspace.clearError} aria-label="关闭提示">×</button>
-        </div>
-      )}
-    </div>
-  );
+  if (activeView === "chat" && userId) {
+    return <ChatWorkspace userId={userId} onChangeView={changeView} />;
+  }
+
+  return userId ? <NotesWorkspace userId={userId} onChangeView={changeView} /> : null;
 }

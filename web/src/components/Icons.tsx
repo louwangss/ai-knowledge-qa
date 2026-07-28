@@ -37,3 +37,19 @@ export function ArrowIcon(props: IconProps) {
 export function ExternalIcon(props: IconProps) {
   return <IconBase {...props}><path d="M14 5h5v5M19 5l-8 8" /><path d="M17 13v6H5V7h6" /></IconBase>;
 }
+
+export function MessageIcon(props: IconProps) {
+  return <IconBase {...props}><path d="M4 5.5h16v11H9l-5 3z" /><path d="M8 9h8M8 13h5" /></IconBase>;
+}
+
+export function SendIcon(props: IconProps) {
+  return <IconBase {...props}><path d="m4 5 16 7-16 7 3-7zM7 12h13" /></IconBase>;
+}
+
+export function StopIcon(props: IconProps) {
+  return <IconBase {...props}><rect x="7" y="7" width="10" height="10" rx="1" /></IconBase>;
+}
+
+export function SparkIcon(props: IconProps) {
+  return <IconBase {...props}><path d="M12 3c.6 4.5 2.5 6.4 7 7-4.5.6-6.4 2.5-7 7-.6-4.5-2.5-6.4-7-7 4.5-.6 6.4-2.5 7-7zM18.5 16.5c.2 1.4.9 2.1 2.3 2.3-1.4.2-2.1.9-2.3 2.3-.2-1.4-.9-2.1-2.3-2.3 1.4-.2 2.1-.9 2.3-2.3z" /></IconBase>;
+}

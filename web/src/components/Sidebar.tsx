@@ -1,5 +1,6 @@
 import type { NoteSummary } from "../types";
 import { ExternalIcon, NoteIcon, PlusIcon, SearchIcon } from "./Icons";
+import { WorkspaceTabs } from "./WorkspaceTabs";
 
 interface SidebarProps {
   summaries: NoteSummary[];
@@ -11,6 +12,7 @@ interface SidebarProps {
   onSelect: (id: number) => void;
   onCreate: () => void;
   onClose: () => void;
+  onChangeView: (view: "chat" | "notes") => void;
 }
 
 function noteLabel(concept: string | null) {
@@ -33,6 +35,7 @@ export function Sidebar({
   onSelect,
   onCreate,
   onClose,
+  onChangeView,
 }: SidebarProps) {
   return (
     <>
@@ -45,6 +48,8 @@ export function Sidebar({
             <span>Knowledge Notes</span>
           </div>
         </header>
+
+        <WorkspaceTabs active="notes" onChange={onChangeView} />
 
         <button className="new-note-button" onClick={onCreate} disabled={isCreating}>
           <PlusIcon />
@@ -92,7 +97,7 @@ export function Sidebar({
         </nav>
 
         <a className="gradio-link" href="http://127.0.0.1:7860" target="_blank" rel="noreferrer">
-          <span>返回问答与文档</span>
+          <span>打开 Gradio 备用入口</span>
           <ExternalIcon />
         </a>
       </aside>
