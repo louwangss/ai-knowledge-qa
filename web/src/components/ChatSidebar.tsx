@@ -1,6 +1,7 @@
 import type { SessionSummary } from "../types";
 import { ExternalIcon, MessageIcon, PlusIcon } from "./Icons";
 import { WorkspaceTabs } from "./WorkspaceTabs";
+import type { WorkspaceView } from "./WorkspaceTabs";
 
 interface ChatSidebarProps {
   sessions: SessionSummary[];
@@ -10,7 +11,7 @@ interface ChatSidebarProps {
   onSelect: (id: string) => void;
   onCreate: () => void;
   onClose: () => void;
-  onChangeView: (view: "chat" | "notes") => void;
+  onChangeView: (view: WorkspaceView) => void;
   onLogout: () => void;
 }
 

@@ -1,8 +1,10 @@
-import { MessageIcon, NoteIcon } from "./Icons";
+import { DocumentIcon, MessageIcon, NoteIcon } from "./Icons";
+
+export type WorkspaceView = "chat" | "notes" | "documents";
 
 interface WorkspaceTabsProps {
-  active: "chat" | "notes";
-  onChange: (view: "chat" | "notes") => void;
+  active: WorkspaceView;
+  onChange: (view: WorkspaceView) => void;
 }
 
 export function WorkspaceTabs({ active, onChange }: WorkspaceTabsProps) {
@@ -23,6 +25,14 @@ export function WorkspaceTabs({ active, onChange }: WorkspaceTabsProps) {
       >
         <NoteIcon />
         笔记
+      </button>
+      <button
+        className={active === "documents" ? "is-active" : ""}
+        aria-current={active === "documents" ? "page" : undefined}
+        onClick={() => onChange("documents")}
+      >
+        <DocumentIcon />
+        文档
       </button>
     </nav>
   );

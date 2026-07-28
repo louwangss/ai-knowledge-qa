@@ -9,6 +9,7 @@
     "test": "vitest",
     "test:e2e": "node e2e/smoke.mjs",
     "test:e2e:chat": "node e2e/chat-smoke.mjs",
+    "test:e2e:documents": "node e2e/documents-smoke.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

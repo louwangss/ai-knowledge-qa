@@ -3,10 +3,11 @@ import { useState } from "react";
 import { useChatWorkspace } from "../useChatWorkspace";
 import { ChatPanel } from "./ChatPanel";
 import { ChatSidebar } from "./ChatSidebar";
+import type { WorkspaceView } from "./WorkspaceTabs";
 
 interface ChatWorkspaceProps {
   userId: string;
-  onChangeView: (view: "chat" | "notes") => void;
+  onChangeView: (view: WorkspaceView) => void;
   onLogout: () => void;
 }
 

@@ -11,14 +11,14 @@
 - **一致性恢复**：Redis 冷恢复不会重复当前消息；LLM 中断只回滚当前 pending turn；完整回答提交后，辅助状态失败不会破坏问答记录。
 - **安全边界**：业务 API 使用 Bearer token，后端固定单一 `APP_USER_ID`；上传有流式大小限制，文档删除失败保留可重试的权威记录。
 - **可观测性**：request/turn ID 串联检索、首 token、完成和失败阶段；日志只记录 ID、计数、耗时、模式与错误类型。
-- **可验证交付**：129 项 Python 自动化测试、12 项 React 交互与安全渲染测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
+- **可验证交付**：137 项 Python 自动化测试、18 项 React 交互与安全渲染测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
 
 ## 架构
 
 ```mermaid
 flowchart LR
     U["用户"] --> G["Gradio :7860"]
-    U --> W["React 问答/笔记工作区 :5173"]
+    U --> W["React 问答/笔记/文档工作区 :5173"]
     G -->|"Bearer + HTTP/SSE"| A["FastAPI :8000"]
     W -->|"HttpOnly 会话 + REST/SSE"| A
 
@@ -145,7 +145,7 @@ cd web
 npm run dev
 ```
 
-独立问答/笔记工作区位于 `http://127.0.0.1:5173/app/`，Gradio 问答与文档页仍作为备用入口位于 `http://127.0.0.1:7860`。健康检查位于 `http://127.0.0.1:8000/`；服务端客户端使用 Bearer token，浏览器工作区使用仅本机签发的 HttpOnly 会话。
+独立问答/笔记/文档工作区位于 `http://127.0.0.1:5173/app/`，Gradio 仍作为备用入口位于 `http://127.0.0.1:7860`。健康检查位于 `http://127.0.0.1:8000/`；服务端客户端使用 Bearer token，浏览器工作区使用仅本机签发的 HttpOnly 会话。
 
 ## 验证与实测证据
 
@@ -160,21 +160,22 @@ npm test -- --run
 npm run build
 ```
 
-2026-07-28 在 Python 3.11、Node.js 24 和 Edge 本地环境的结果：
+2026-07-29 在 Python 3.11、Node.js 24 和 Edge 本地环境的结果：
 
 | 检查 | 实际结果 |
 | --- | --- |
-| pytest | 129 passed |
-| React 前端 | 12 passed；覆盖笔记、会话、normal/deep、SSE 任意分块和安全 Markdown；TypeScript 检查和 Vite 生产构建通过；npm audit 0 vulnerabilities |
+| pytest | 137 passed |
+| React 前端 | 18 passed；覆盖笔记、会话、文档上传/删除、normal/deep、SSE 任意分块和安全 Markdown；TypeScript 检查和 Vite 生产构建通过；npm audit 0 vulnerabilities |
 | Edge 笔记切换 | 6 篇真实笔记：未缓存切换 64–75 ms，缓存切换 19–35 ms；控制台 0 error |
 | Edge React 问答 | 真实 normal/deep SSE 流程完成；桌面与 390 px 移动布局通过；控制台 0 error/warning，浏览器存储与 URL 无凭证 |
+| Edge React 文档 | 真实上传、索引和删除闭环完成并自动清理；1440/768/320 px 无横向溢出，控制台 0 error/warning，浏览器存储与 URL 无凭证 |
 | 后端模块导入 | 优化前单次冷导入约 20.97 秒；惰性加载后，三次独立进程实测 1.515–1.548 秒 |
 | Gradio 首屏初始化 | 隔离 Edge 同会话三次实测：旧版 5.385 / 3.307 / 3.608 秒；聚合读取后 2.892 / 1.639 / 1.366 秒。完全冷启动仍受 Gradio 进程启动影响，本机单次约 8.2 秒 |
 | pip check | No broken requirements found |
 | 本地服务联调 | 根路径 200；带正确 token 的空测试用户会话查询 200；Redis PING 成功 |
 | 故障路径 | 覆盖 Redis miss、LLM 中断、超限上传、Chroma 删除失败、跨用户访问和摘要会话删除 |
 
-仓库提供 `npm run test:e2e:chat` 做真实 normal/deep 问答与自动清理，`npm run test:e2e:chat -- --visual-only` 可复用既有会话做无 LLM 成本的桌面/移动视觉检查。正式演示前仍建议在目标机器手动走一遍上传、问答、切换与删除流程。
+仓库提供 `npm run test:e2e:chat` 做真实 normal/deep 问答与自动清理，`npm run test:e2e:documents` 做真实文档上传、响应式检查和自动删除，`npm run test:e2e:chat -- --visual-only` 可复用既有会话做无 LLM 成本的桌面/移动视觉检查。正式演示前仍建议在目标机器手动走一遍上传、问答、切换与删除流程。
 
 ### 无密钥 RAG 离线评测
 
@@ -226,7 +227,7 @@ python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 
 ## 适合简历的表述参考
 
-> 设计并实现基于 React、FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持 normal/deep 双模式 SSE 流式回答、会话缓存和笔记自动保存；修复跨存储状态一致性与并行 Session 问题，引入 HttpOnly 本机会话、流式上传限制和低敏感 turn 级可观测性，并以 129 项 Python、12 项 React 测试、无密钥 CI 与可复现离线评测固化工程证据。
+> 设计并实现基于 React、FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持文档上传管理、normal/deep 双模式 SSE 流式回答、会话缓存和笔记自动保存；修复跨存储状态一致性与并行 Session 问题，引入 HttpOnly 本机会话、流式上传限制和低敏感 turn 级可观测性，并以 137 项 Python、18 项 React 测试、无密钥 CI 与可复现离线评测固化工程证据。
 
 面试时建议重点解释三个取舍：为什么 MySQL 是权威数据源、为什么 Chroma/Redis 失败采用可恢复策略、为什么公开评测基线不能等同于线上模型质量。
 
@@ -242,5 +243,5 @@ memory/       短期、情景和语义记忆
 rag/          Loader、Splitter、Chroma、Retriever 与 LLM 封装
 tests/        自动化测试
 tools/        Web Search 与 Calculator 工具
-web/          React 问答与笔记工作区、组件测试和 Edge E2E
+web/          React 问答、笔记与文档工作区、组件测试和 Edge E2E
 ```

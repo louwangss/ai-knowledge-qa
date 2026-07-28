@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from "react";
 
 import { ApiError, createWebSession, deleteWebSession, getWebConfig, getWebSessionStatus } from "./api";
 import { ChatWorkspace } from "./components/ChatWorkspace";
+import { DocumentsWorkspace } from "./components/DocumentsWorkspace";
 import { NotesWorkspace } from "./components/NotesWorkspace";
+import type { WorkspaceView } from "./components/WorkspaceTabs";
 import "./styles.css";
 
 type AuthState = "checking" | "required" | "ready";
-type ActiveView = "chat" | "notes";
-
-function initialView(): ActiveView {
-  return new URLSearchParams(window.location.search).get("view") === "chat" ? "chat" : "notes";
+function initialView(): WorkspaceView {
+  const view = new URLSearchParams(window.location.search).get("view");
+  return view === "chat" || view === "documents" ? view : "notes";
 }
 
 function takeBootstrapToken() {
@@ -24,7 +25,7 @@ export default function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [tokenInput, setTokenInput] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<ActiveView>(initialView);
+  const [activeView, setActiveView] = useState<WorkspaceView>(initialView);
   const authStartedRef = useRef(false);
 
   async function finishAuthentication(token?: string | null) {
@@ -53,9 +54,9 @@ export default function App() {
     void finishAuthentication(takeBootstrapToken());
   }, []);
 
-  function changeView(view: ActiveView) {
+  function changeView(view: WorkspaceView) {
     const url = new URL(window.location.href);
-    if (view === "chat") url.searchParams.set("view", "chat");
+    if (view !== "notes") url.searchParams.set("view", view);
     else url.searchParams.delete("view");
     window.history.replaceState(null, "", `${url.pathname}${url.search}`);
     setActiveView(view);
@@ -74,7 +75,7 @@ export default function App() {
   }
 
   if (authState === "checking") {
-    return <div className="app-loading" role="status"><span className="brand-mark">知</span><p>正在打开笔记工作区…</p></div>;
+    return <div className="app-loading" role="status"><span className="brand-mark">知</span><p>正在打开知识工作区…</p></div>;
   }
 
   if (authState === "required") {
@@ -96,7 +97,7 @@ export default function App() {
               required
             />
             {authError && <div className="auth-error" role="alert">{authError}</div>}
-            <button type="submit">进入笔记</button>
+            <button type="submit">进入工作区</button>
           </form>
         </section>
       </main>
@@ -107,6 +108,15 @@ export default function App() {
     return (
       <>
         <ChatWorkspace userId={userId} onChangeView={changeView} onLogout={() => void logout()} />
+        {authError && <div className="toast" role="alert">{authError}</div>}
+      </>
+    );
+  }
+
+  if (activeView === "documents" && userId) {
+    return (
+      <>
+        <DocumentsWorkspace userId={userId} onChangeView={changeView} onLogout={() => void logout()} />
         {authError && <div className="toast" role="alert">{authError}</div>}
       </>
     );

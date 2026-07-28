@@ -27,7 +27,7 @@ try {
   const tokenInput = page.getByLabel("访问令牌");
   if (await tokenInput.isVisible()) {
     await tokenInput.fill(readAccessToken());
-    await page.getByRole("button", { name: "进入笔记" }).click();
+    await page.getByRole("button", { name: "进入工作区" }).click();
   }
   await page.locator(".editor-shell").waitFor();
   await page.locator(".note-list-item").first().waitFor();

@@ -22,6 +22,14 @@ export function NoteIcon(props: IconProps) {
   return <IconBase {...props}><path d="M6 3.5h9l3 3v14H6z" /><path d="M15 3.5v4h3M9 12h6M9 16h5" /></IconBase>;
 }
 
+export function DocumentIcon(props: IconProps) {
+  return <IconBase {...props}><path d="M6 3.5h8l4 4v13H6z" /><path d="M14 3.5v4h4M9 12h6M9 16h6" /></IconBase>;
+}
+
+export function UploadIcon(props: IconProps) {
+  return <IconBase {...props}><path d="M12 16V4M7.5 8.5 12 4l4.5 4.5" /><path d="M5 15v5h14v-5" /></IconBase>;
+}
+
 export function TrashIcon(props: IconProps) {
   return <IconBase {...props}><path d="M4 7h16M9 3.5h6L16 7H8zM7 7l1 13h8l1-13M10 11v5M14 11v5" /></IconBase>;
 }

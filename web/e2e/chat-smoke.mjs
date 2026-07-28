@@ -78,7 +78,7 @@ try {
   const tokenInput = page.getByLabel("访问令牌");
   if (await tokenInput.isVisible()) {
     await tokenInput.fill(env.APP_ACCESS_TOKEN);
-    await page.getByRole("button", { name: "进入笔记" }).click();
+    await page.getByRole("button", { name: "进入工作区" }).click();
   }
   await page.getByLabel("会话导航").getByRole("button", { name: "新建会话" }).waitFor();
 

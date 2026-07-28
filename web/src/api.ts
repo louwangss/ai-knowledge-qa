@@ -4,6 +4,7 @@ import type {
   ChatHistoryMessage,
   ChatMode,
   ChatStreamEvent,
+  KnowledgeDocument,
   Note,
   NoteSummary,
   SessionSummary,
@@ -21,13 +22,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (typeof init?.body === "string" && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(`${API_ROOT}${path}`, {
     credentials: "include",
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
+    headers,
   });
   if (!response.ok) {
     let body: ApiErrorBody = {};
@@ -94,6 +96,23 @@ export async function updateNote(
 
 export async function deleteNote(userId: string, noteId: number): Promise<void> {
   await request(`/notes/${noteId}?user_id=${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listDocuments(userId: string): Promise<KnowledgeDocument[]> {
+  return request(`/documents?user_id=${encodeURIComponent(userId)}`);
+}
+
+export async function uploadDocument(userId: string, file: File): Promise<KnowledgeDocument> {
+  const body = new FormData();
+  body.append("user_id", userId);
+  body.append("file", file);
+  return request("/documents", { method: "POST", body });
+}
+
+export async function deleteDocument(userId: string, documentId: string): Promise<void> {
+  await request(`/documents/${encodeURIComponent(documentId)}?user_id=${encodeURIComponent(userId)}`, {
     method: "DELETE",
   });
 }

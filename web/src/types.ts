@@ -18,6 +18,16 @@ export interface ApiErrorBody {
   detail?: string | { code?: string; message?: string };
 }
 
+export interface KnowledgeDocument {
+  id: string;
+  filename: string;
+  file_type: string;
+  file_size: number | null;
+  chunk_count: number | null;
+  status: "processing" | "ready" | "failed";
+  created_at: string;
+}
+
 export type ChatMode = "normal" | "deep";
 
 export interface SessionSummary {

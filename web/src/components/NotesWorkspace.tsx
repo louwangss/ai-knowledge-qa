@@ -3,10 +3,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useNotesWorkspace } from "../useNotesWorkspace";
 import { Editor } from "./Editor";
 import { Sidebar } from "./Sidebar";
+import type { WorkspaceView } from "./WorkspaceTabs";
 
 interface NotesWorkspaceProps {
   userId: string;
-  onChangeView: (view: "chat" | "notes") => void;
+  onChangeView: (view: WorkspaceView) => void;
   onLogout: () => void;
 }
 

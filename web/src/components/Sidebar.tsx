@@ -1,6 +1,7 @@
 import type { NoteSummary } from "../types";
 import { ExternalIcon, NoteIcon, PlusIcon, SearchIcon } from "./Icons";
 import { WorkspaceTabs } from "./WorkspaceTabs";
+import type { WorkspaceView } from "./WorkspaceTabs";
 
 interface SidebarProps {
   summaries: NoteSummary[];
@@ -12,7 +13,7 @@ interface SidebarProps {
   onSelect: (id: number) => void;
   onCreate: () => void;
   onClose: () => void;
-  onChangeView: (view: "chat" | "notes") => void;
+  onChangeView: (view: WorkspaceView) => void;
   onLogout: () => void;
 }
 
