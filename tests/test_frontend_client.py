@@ -211,6 +211,104 @@ def test_note_autosave_is_single_debounced_event():
     assert dependencies[0]["trigger_mode"] == "always_last"
 
 
+def test_note_mutations_hide_blocking_progress_animation():
+    from frontend import app as frontend_app
+
+    ui = frontend_app.build_ui()
+    note_dependencies = [
+        dependency
+        for dependency in ui.config["dependencies"]
+        if ui.fns[dependency["id"]].concurrency_id == "note-autosave"
+    ]
+
+    assert len(note_dependencies) >= 5
+    assert all(item["show_progress"] == "hidden" for item in note_dependencies)
+
+
+def test_new_note_updates_local_choices_without_refetch(monkeypatch):
+    from frontend import app as frontend_app
+
+    async def fake_save(user_id, concept, content, note_id):
+        assert (user_id, concept, content, note_id) == ("u1", "", "", None)
+        return "保存成功", 9
+
+    async def fail_list_notes(*args, **kwargs):
+        raise AssertionError("新建后不应重新请求笔记列表")
+
+    monkeypatch.setattr(frontend_app, "api_save_note", fake_save)
+    monkeypatch.setattr(frontend_app, "api_list_notes", fail_list_notes)
+    ui = frontend_app.build_ui()
+    handler = next(
+        block.fn for block in ui.fns.values()
+        if block.fn is not None and block.fn.__name__ == "on_new_note"
+    )
+    snapshot = frontend_app.note_snapshot("标题", "正文")
+
+    result = asyncio.run(
+        handler("u1", 1, "标题", "正文", snapshot, [("标题", 1)])
+    )
+
+    assert result[0] == 9
+    assert result[5]["choices"] == [("无标题", 9), ("标题", 1)]
+
+
+def test_delete_note_updates_local_choices_without_refetch(monkeypatch):
+    from frontend import app as frontend_app
+
+    async def fake_delete(user_id, note_id):
+        assert (user_id, note_id) == ("u1", 2)
+        return "删除成功"
+
+    async def fake_get_note(user_id, note_id):
+        assert (user_id, note_id) == ("u1", 1)
+        return {"id": 1, "concept": "保留笔记", "content": "正文"}
+
+    async def fail_list_notes(*args, **kwargs):
+        raise AssertionError("删除后不应重新请求笔记列表")
+
+    monkeypatch.setattr(frontend_app, "api_delete_note", fake_delete)
+    monkeypatch.setattr(frontend_app, "api_get_note", fake_get_note)
+    monkeypatch.setattr(frontend_app, "api_list_notes", fail_list_notes)
+    ui = frontend_app.build_ui()
+    handler = next(
+        block.fn for block in ui.fns.values()
+        if block.fn is not None and block.fn.__name__ == "on_confirm_delete_note"
+    )
+
+    result = asyncio.run(
+        handler(2, "u1", [("保留笔记", 1), ("待删除", 2)])
+    )
+
+    assert result[0] == 1
+    assert result[5]["choices"] == [("保留笔记", 1)]
+
+
+def test_deleted_note_stays_removed_when_loading_next_note_fails(monkeypatch):
+    from frontend import app as frontend_app
+
+    async def fake_delete(user_id, note_id):
+        return "删除成功"
+
+    async def fail_get_note(user_id, note_id):
+        raise httpx.ConnectError("temporary failure")
+
+    monkeypatch.setattr(frontend_app, "api_delete_note", fake_delete)
+    monkeypatch.setattr(frontend_app, "api_get_note", fail_get_note)
+    ui = frontend_app.build_ui()
+    handler = next(
+        block.fn for block in ui.fns.values()
+        if block.fn is not None and block.fn.__name__ == "on_confirm_delete_note"
+    )
+
+    result = asyncio.run(
+        handler(2, "u1", [("保留笔记", 1), ("待删除", 2)])
+    )
+
+    assert result[0] is None
+    assert "笔记已删除" in result[3]
+    assert result[5]["choices"] == [("保留笔记", 1)]
+
+
 def test_note_snapshot_does_not_depend_on_a_text_delimiter():
     from frontend import app as frontend_app
 

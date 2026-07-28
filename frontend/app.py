@@ -440,6 +440,7 @@ APP_CSS = """
         overflow: hidden; border: 1px solid var(--border); border-radius: .75rem;
         background: var(--surface); box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
     }
+    .notes-workspace .progress-text { display: none !important; }
     .note-sidebar {
         min-height: calc(100vh - 9.5rem); padding: 1rem !important;
         background: var(--surface-muted); border-right: 1px solid var(--border);
@@ -815,6 +816,7 @@ def build_ui():
             api_name=False,
             concurrency_limit=1,
             concurrency_id="note-autosave",
+            show_progress="hidden",
         )
 
         async def on_new_note(user_id, current_id, concept, content, expected, choices):
@@ -830,16 +832,18 @@ def build_ui():
             updated_choices = _updated_note_choices(choices, current_id, concept)
             try:
                 _, new_id = await api_save_note(user_id, "", "", None)
-                refreshed_choices = await api_list_notes(user_id)
             except Exception:
                 return (
                     current_id, concept, content, "⚠ 新建失败，请重试", snapshot,
                     gr.update(choices=updated_choices, value=current_id), updated_choices,
                     gr.update(visible=False),
                 )
+            next_choices = [("无标题", new_id)] + [
+                item for item in updated_choices if item[1] != new_id
+            ]
             return (
                 new_id, "", "", "新笔记 · 已保存", note_snapshot("", ""),
-                gr.update(choices=refreshed_choices, value=new_id), refreshed_choices,
+                gr.update(choices=next_choices, value=new_id), next_choices,
                 gr.update(visible=False),
             )
 
@@ -852,6 +856,7 @@ def build_ui():
             api_name=False,
             concurrency_limit=1,
             concurrency_id="note-autosave",
+            show_progress="hidden",
         )
 
         def on_delete_note_click(note_id_val):
@@ -868,6 +873,8 @@ def build_ui():
             on_delete_note_click,
             inputs=[note_id_state],
             outputs=[note_status, delete_note_btn, confirm_delete_note_btn, cancel_delete_note_btn],
+            queue=False,
+            show_progress="hidden",
         )
 
         def on_cancel_delete_note():
@@ -881,9 +888,11 @@ def build_ui():
         cancel_delete_note_btn.click(
             on_cancel_delete_note,
             outputs=[note_status, delete_note_btn, confirm_delete_note_btn, cancel_delete_note_btn],
+            queue=False,
+            show_progress="hidden",
         )
 
-        async def on_confirm_delete_note(note_id_val, user_id):
+        async def on_confirm_delete_note(note_id_val, user_id, choices):
             if not note_id_val or not user_id:
                 return (
                     None, "", "", "请选择笔记", note_snapshot("", ""),
@@ -892,16 +901,6 @@ def build_ui():
                 )
             try:
                 await api_delete_note(user_id, note_id_val)
-                choices = await api_list_notes(user_id)
-                next_id = choices[0][1] if choices else None
-                loaded = await _load_note(next_id, user_id)
-                return (
-                    loaded[0], loaded[1], loaded[2],
-                    "笔记已删除" if next_id else "笔记已删除，新建一篇开始记录",
-                    loaded[4], gr.update(choices=choices, value=next_id),
-                    gr.update(visible=False), choices,
-                    gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
-                )
             except Exception:
                 return (
                     note_id_val, gr.update(), gr.update(), "删除失败，请重试", gr.update(),
@@ -909,14 +908,37 @@ def build_ui():
                     gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
                 )
 
+            remaining_choices = [
+                item for item in (choices or []) if item[1] != note_id_val
+            ]
+            next_id = remaining_choices[0][1] if remaining_choices else None
+            try:
+                loaded = await _load_note(next_id, user_id)
+            except Exception:
+                return (
+                    None, "", "", "笔记已删除，下一篇加载失败，请重新选择",
+                    note_snapshot("", ""),
+                    gr.update(choices=remaining_choices, value=None),
+                    gr.update(visible=False), remaining_choices,
+                    gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
+                )
+            return (
+                loaded[0], loaded[1], loaded[2],
+                "笔记已删除" if next_id else "笔记已删除，新建一篇开始记录",
+                loaded[4], gr.update(choices=remaining_choices, value=next_id),
+                gr.update(visible=False), remaining_choices,
+                gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
+            )
+
         confirm_delete_note_btn.click(
             on_confirm_delete_note,
-            inputs=[note_id_state, user_id_state],
+            inputs=[note_id_state, user_id_state, _notes_choices],
             outputs=[note_id_state, concept_input, content_input, note_status,
                      _expected_content, note_list, retry_note_btn, _notes_choices,
                      delete_note_btn, confirm_delete_note_btn, cancel_delete_note_btn],
             concurrency_limit=1,
             concurrency_id="note-autosave",
+            show_progress="hidden",
         )
 
         # ---- 会话管理事件 ----
