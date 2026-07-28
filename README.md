@@ -11,7 +11,7 @@
 - **一致性恢复**：Redis 冷恢复不会重复当前消息；LLM 中断只回滚当前 pending turn；完整回答提交后，辅助状态失败不会破坏问答记录。
 - **安全边界**：业务 API 使用 Bearer token，后端固定单一 `APP_USER_ID`；上传有流式大小限制，文档删除失败保留可重试的权威记录。
 - **可观测性**：request/turn ID 串联检索、首 token、完成和失败阶段；日志只记录 ID、计数、耗时、模式与错误类型。
-- **可验证交付**：99 项自动化测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
+- **可验证交付**：102 项自动化测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
 
 ## 架构
 
@@ -113,8 +113,22 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ### 3. 初始化与启动
 
-```bash
+```powershell
 python -m db.init_db
+
+# Windows：双击 start.bat，或在终端执行
+.\start.bat
+```
+
+`start.bat` 会优先使用项目的 `venv`，在同一个窗口中同时启动后端和前端；按 `Ctrl+C` 会一起关闭两个服务。跨平台环境可以直接运行同一启动器：
+
+```bash
+python launcher.py
+```
+
+也可以在两个终端中分别启动，便于单独调试：
+
+```bash
 
 # 终端一：后端
 python -m app.main
@@ -139,7 +153,7 @@ python -m compileall -q app agents db evaluation frontend memory rag tools
 
 | 检查 | 实际结果 |
 | --- | --- |
-| pytest | 99 passed |
+| pytest | 102 passed |
 | pip check | No broken requirements found |
 | 本地服务联调 | 根路径 200；带正确 token 的空测试用户会话查询 200；Redis PING 成功 |
 | 故障路径 | 覆盖 Redis miss、LLM 中断、超限上传、Chroma 删除失败、跨用户访问和摘要会话删除 |
@@ -196,7 +210,7 @@ python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 
 ## 适合简历的表述参考
 
-> 设计并实现基于 FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持 normal/deep 双模式 SSE 流式回答；修复跨存储状态一致性与并行 Session 问题，引入 Bearer 单用户安全边界、流式上传限制和低敏感 turn 级可观测性，并以 99 项自动化测试、无密钥 CI 与可复现离线评测固化工程证据。
+> 设计并实现基于 FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持 normal/deep 双模式 SSE 流式回答；修复跨存储状态一致性与并行 Session 问题，引入 Bearer 单用户安全边界、流式上传限制和低敏感 turn 级可观测性，并以 102 项自动化测试、无密钥 CI 与可复现离线评测固化工程证据。
 
 面试时建议重点解释三个取舍：为什么 MySQL 是权威数据源、为什么 Chroma/Redis 失败采用可恢复策略、为什么公开评测基线不能等同于线上模型质量。
 
