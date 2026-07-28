@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_service_commands_use_current_python_and_project_root():
     import launcher
@@ -34,6 +36,57 @@ def test_main_stops_both_services_when_one_exits(monkeypatch):
 
     assert exit_code == 3
     assert stopped == services
+
+
+def test_backend_becomes_ready_before_frontend_starts(monkeypatch):
+    import launcher
+
+    events = []
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self):
+            return 0
+
+    def fake_popen(command, cwd):
+        service_name = "后端" if "uvicorn" in command else "前端"
+        events.append(f"启动{service_name}")
+        return FakeProcess()
+
+    def fake_wait_for_ready(service):
+        events.append(f"等待{service.name}就绪")
+
+    services = launcher.build_services()
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launcher, "wait_for_service_ready", fake_wait_for_ready)
+
+    launcher.start_services(services)
+
+    assert events == ["启动后端", "等待后端就绪", "启动前端"]
+
+
+def test_readiness_check_reports_backend_early_exit():
+    import launcher
+
+    class ExitedProcess:
+        def poll(self):
+            return 2
+
+    service = launcher.Service(
+        name="后端",
+        command=(sys.executable, "-m", "uvicorn"),
+        cwd=Path(launcher.__file__).resolve().parent,
+        process=ExitedProcess(),
+        health_url="http://127.0.0.1:8000/",
+    )
+
+    with pytest.raises(RuntimeError, match="后端启动失败.*退出码 2"):
+        launcher.wait_for_service_ready(service)
 
 
 def test_windows_entrypoint_prefers_project_virtual_environment():
