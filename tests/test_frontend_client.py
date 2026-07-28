@@ -109,6 +109,71 @@ def test_frontend_initialization_error_does_not_expose_token(monkeypatch):
     assert secret not in result[-1]
 
 
+def test_frontend_initialization_loads_first_screen_data_in_one_stage(monkeypatch):
+    from frontend import app as frontend_app
+
+    started = set()
+    all_started = asyncio.Event()
+    first_stage = {"user", "documents", "sessions", "notes"}
+
+    async def finish_first_stage(name, value):
+        started.add(name)
+        if started == first_stage:
+            all_started.set()
+        await all_started.wait()
+        return value
+
+    async def fake_create_user():
+        return await finish_first_stage("user", "u1")
+
+    async def fake_fetch_documents(user_id):
+        assert user_id == "u1"
+        return await finish_first_stage(
+            "documents",
+            [{"id": "document-1", "filename": "知识.md", "chunk_count": 2,
+              "created_at": "2026-07-28T00:00:00"}],
+        )
+
+    async def fake_list_sessions(user_id):
+        assert user_id == "u1"
+        return await finish_first_stage(
+            "sessions",
+            [{"id": "session-1", "title": "已有会话"}],
+        )
+
+    async def fake_list_notes(user_id):
+        assert user_id == "u1"
+        return await finish_first_stage("notes", [("笔记", 1)])
+
+    async def fake_history(user_id, session_id):
+        assert (user_id, session_id) == ("u1", "session-1")
+        return [{"role": "user", "content": "历史问题"}]
+
+    monkeypatch.setattr(frontend_app, "APP_USER_ID", "u1", raising=False)
+    monkeypatch.setattr(frontend_app, "api_create_user", fake_create_user)
+    monkeypatch.setattr(
+        frontend_app,
+        "_api_fetch_documents",
+        fake_fetch_documents,
+        raising=False,
+    )
+    monkeypatch.setattr(frontend_app, "api_list_sessions", fake_list_sessions)
+    monkeypatch.setattr(frontend_app, "api_list_notes", fake_list_notes)
+    monkeypatch.setattr(frontend_app, "api_get_chat_history", fake_history)
+
+    result = asyncio.run(asyncio.wait_for(frontend_app.init_app(), timeout=1.0))
+
+    assert started == first_stage
+    assert result[0] == "u1"
+    assert result[1] == "session-1"
+    assert result[2] == [["知识.md", 2, "2026-07-28T00:00:00"]]
+    assert result[3]["choices"] == [("知识.md (#document)", "document-1")]
+    assert result[5] == [{"role": "user", "content": "历史问题"}]
+    assert result[6]["choices"] == [("笔记", 1)]
+    assert result[7] == [("笔记", 1)]
+    assert result[8] == "就绪"
+
+
 def test_default_bind_hosts_are_loopback():
     from app import main as api_main
     from frontend import app as frontend_app

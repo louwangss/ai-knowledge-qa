@@ -38,7 +38,7 @@ def test_main_stops_both_services_when_one_exits(monkeypatch):
     assert stopped == services
 
 
-def test_backend_becomes_ready_before_frontend_starts(monkeypatch):
+def test_frontend_starts_while_backend_is_becoming_ready(monkeypatch):
     import launcher
 
     events = []
@@ -68,7 +68,7 @@ def test_backend_becomes_ready_before_frontend_starts(monkeypatch):
 
     launcher.start_services(services)
 
-    assert events == ["启动后端", "等待后端就绪", "启动前端"]
+    assert events == ["启动后端", "启动前端", "等待后端就绪"]
 
 
 def test_start_services_rejects_an_existing_backend(monkeypatch):

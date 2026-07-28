@@ -86,15 +86,21 @@ def wait_for_service_ready(service: Service) -> None:
 
 
 def start_services(services: list[Service]) -> None:
-    """依次启动服务；启动失败时回收已创建的进程。"""
+    """并行拉起服务，再等待需要健康检查的服务就绪。"""
     try:
+        # 先完成全部占用检查，避免启动部分进程后才发现旧后端仍在运行。
         for service in services:
             if service.health_url is not None and is_service_ready(service.health_url):
                 raise RuntimeError(
                     f"{service.name}地址已被占用，请先关闭旧服务"
                 )
+
+        # 前端导入与界面构建可以和后端启动并行，缩短完整可用时间。
+        for service in services:
             print(f"[启动] {service.name}: {' '.join(service.command[1:])}")
             service.process = subprocess.Popen(service.command, cwd=service.cwd)
+
+        for service in services:
             if service.health_url is not None:
                 wait_for_service_ready(service)
     except (OSError, RuntimeError):

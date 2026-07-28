@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 load_dotenv()
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "").strip()
+APP_USER_ID = os.getenv("APP_USER_ID", "default-user").strip()
 GRADIO_HOST = os.getenv("GRADIO_HOST", "127.0.0.1").strip()
-DEFAULT_USER_ID = "default-user"  # 单用户 MVP
 
 
 # ---- API 调用 ----
@@ -29,6 +29,8 @@ def validate_frontend_config(access_token: str, server_name: str) -> None:
 
 
 validate_frontend_config(APP_ACCESS_TOKEN, GRADIO_HOST)
+if not APP_USER_ID:
+    raise RuntimeError("环境变量 APP_USER_ID 不能为空")
 
 
 def _api_client(timeout=None) -> httpx.AsyncClient:
@@ -97,12 +99,24 @@ async def api_upload_document(user_id: str, file) -> str:
         return f"文档《{data['filename']}》已就绪（{data.get('chunk_count', 0)} 个片段）"
 
 
-async def api_list_documents(user_id: str) -> list[list]:
+async def _api_fetch_documents(user_id: str) -> list[dict]:
     async with _api_client() as client:
         resp = await client.get(f"{API_URL}/api/v1/documents", params={"user_id": user_id})
         resp.raise_for_status()
-        docs = resp.json()
-        return [[d["filename"], d.get("chunk_count", 0), d["created_at"]] for d in docs]
+        return resp.json()
+
+
+def _documents_table(docs: list[dict]) -> list[list]:
+    return [[d["filename"], d.get("chunk_count", 0), d["created_at"]] for d in docs]
+
+
+def _documents_dropdown(docs: list[dict]) -> dict:
+    choices = [(f"{d['filename']} (#{d['id'][:8]})", d["id"]) for d in docs]
+    return gr.update(choices=choices)
+
+
+async def api_list_documents(user_id: str) -> list[list]:
+    return _documents_table(await _api_fetch_documents(user_id))
 
 
 async def api_delete_document(user_id: str, doc_id: str) -> str:
@@ -165,12 +179,7 @@ async def api_delete_note(user_id: str, note_id) -> str:
 
 async def api_get_documents_dropdown(user_id: str) -> dict:
     """获取文档下拉选项"""
-    async with _api_client() as client:
-        resp = await client.get(f"{API_URL}/api/v1/documents", params={"user_id": user_id})
-        resp.raise_for_status()
-        docs = resp.json()
-    choices = [(f"{d['filename']} (#{d['id'][:8]})", d["id"]) for d in docs]
-    return gr.update(choices=choices)
+    return _documents_dropdown(await _api_fetch_documents(user_id))
 
 
 # ---- SSE 解析 ----
@@ -265,13 +274,15 @@ async def chat_fn(message, history, mode, user_id, session_id):
 async def init_app():
     """页面加载时创建用户，加载会话列表和最近会话的聊天记录"""
     try:
-        user_id = await api_create_user()
-        # 并行加载文档、文档下拉、会话列表
-        docs, doc_choices, sessions = await asyncio.gather(
-            api_list_documents(user_id),
-            api_get_documents_dropdown(user_id),
-            api_list_sessions(user_id),
+        # 单用户 ID 来自同一份环境配置，读取请求无需等待幂等的用户创建完成。
+        user_id, document_data, sessions, notes = await asyncio.gather(
+            api_create_user(),
+            _api_fetch_documents(APP_USER_ID),
+            api_list_sessions(APP_USER_ID),
+            api_list_notes(APP_USER_ID),
         )
+        docs = _documents_table(document_data)
+        doc_choices = _documents_dropdown(document_data)
 
         session_items = [(s["title"] or "新会话", s["id"]) for s in sessions]
 
@@ -285,10 +296,29 @@ async def init_app():
             chatbot_init = []
             session_items = [("新会话", session_id)]
 
-        return (user_id, session_id, docs, doc_choices,
-                gr.update(choices=session_items, value=session_id), chatbot_init, "就绪")
+        return (
+            user_id,
+            session_id,
+            docs,
+            doc_choices,
+            gr.update(choices=session_items, value=session_id),
+            chatbot_init,
+            gr.update(choices=notes),
+            notes,
+            "就绪",
+        )
     except Exception:
-        return ("", "", [], gr.update(), gr.update(), [], "初始化失败，请检查后端服务和认证配置")
+        return (
+            "",
+            "",
+            [],
+            gr.update(),
+            gr.update(),
+            [],
+            gr.update(),
+            [],
+            "初始化失败，请检查后端服务和认证配置",
+        )
 
 
 # ---- Gradio 界面 ----
@@ -387,21 +417,11 @@ def build_ui():
 
         # ---- 事件绑定 ----
 
-        # 页面加载（笔记单独通过 .then 加载）
-        async def load_notes_only(user_id):
-            if not user_id:
-                return gr.update(), []
-            choices = await api_list_notes(user_id)
-            return gr.update(choices=choices), choices
-
+        # 页面加载：首屏数据由 init_app 在同一阶段并行获取。
         app.load(
             fn=init_app,
             outputs=[user_id_state, session_id_state, docs_table, doc_dropdown,
-                     session_dropdown, chatbot, status_md],
-        ).then(
-            fn=load_notes_only,
-            inputs=[user_id_state],
-            outputs=[note_list, _notes_choices],
+                     session_dropdown, chatbot, note_list, _notes_choices, status_md],
         )
 
         # 发送消息（完成后刷新会话列表，更新标题）
