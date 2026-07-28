@@ -1,6 +1,16 @@
 """Pydantic 请求/响应模型"""
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+
+
+MAX_NOTE_CONTENT_BYTES = 65_535
+
+
+def _validate_note_content_bytes(value: str | None) -> str | None:
+    """MySQL TEXT 按字节限制容量，按 UTF-8 编码在 API 边界校验。"""
+    if value is not None and len(value.encode("utf-8")) > MAX_NOTE_CONTENT_BYTES:
+        raise ValueError("笔记正文过长")
+    return value
 
 
 # ---- User ----
@@ -75,13 +85,17 @@ class ChatMessage(BaseModel):
 
 class NoteCreate(BaseModel):
     user_id: str
-    concept: str
-    content: str
+    concept: str = Field(default="", max_length=100)
+    content: str = ""
+
+    _validate_content = field_validator("content")(_validate_note_content_bytes)
 
 
 class NoteUpdate(BaseModel):
-    concept: str | None = None
+    concept: str | None = Field(default=None, max_length=100)
     content: str | None = None
+
+    _validate_content = field_validator("content")(_validate_note_content_bytes)
 
 
 class NoteResponse(BaseModel):

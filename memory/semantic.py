@@ -1,6 +1,8 @@
 """语义记忆：MySQL source of truth + Chroma 索引层"""
 import logging
 from datetime import datetime
+from collections import defaultdict
+from threading import Lock
 
 from sqlalchemy.orm import Session
 
@@ -9,6 +11,7 @@ from db.models import SemanticMemory
 logger = logging.getLogger(__name__)
 
 _SIMILARITY_DISTANCE_THRESHOLD = 0.15  # 余弦距离 <= 此值认为重复
+_NOTE_SYNC_LOCKS: defaultdict[int, Lock] = defaultdict(Lock)
 
 
 def get_semantic_vector_store():
@@ -51,32 +54,19 @@ def create_note(
     user_id: str,
     concept: str,
     content: str,
-) -> tuple[SemanticMemory, bool]:
-    """创建笔记。
-
-    Returns:
-        (note, is_duplicate) — is_duplicate=True 表示跳过写入（相似度检测命中）
-    """
-    # 1. 相似度检测
-    existing = check_similarity(db, user_id, content)
-    if existing:
-        return existing, True
-
-    # 2. MySQL INSERT（chroma_id = NULL）
+) -> SemanticMemory:
+    """只在 MySQL 创建笔记；向量索引由后台任务异步生成。"""
     note = SemanticMemory(
         user_id=user_id,
         concept=concept,
         content=content,
-        chroma_id=None,
+        # 空字符串表示空白草稿无需向量，NULL 表示等待后台同步。
+        chroma_id="" if not content.strip() else None,
     )
     db.add(note)
     db.commit()
     db.refresh(note)
-
-    # 3. Chroma ADD
-    _sync_to_chroma(db, note)
-
-    return note, False
+    return note
 
 
 def update_note(
@@ -99,21 +89,10 @@ def update_note(
     if content is not None:
         note.content = content
     note.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(note)
-
-    # 删除旧向量，重新写入
-    if note.chroma_id:
-        try:
-            vs = get_semantic_vector_store()
-            vs.delete(ids=[note.chroma_id])
-        except Exception as e:
-            logger.warning("删除旧向量失败: error_type=%s", type(e).__name__)
-
+    # MySQL 是权威数据源；NULL 标记后台需要重建派生向量。
     note.chroma_id = None
     db.commit()
-    _sync_to_chroma(db, note)
-
+    db.refresh(note)
     return note
 
 
@@ -126,13 +105,11 @@ def delete_note(db: Session, note_id: int, user_id: str) -> bool:
     if not note:
         return False
 
-    # 先删 Chroma
-    if note.chroma_id:
-        try:
-            vs = get_semantic_vector_store()
-            vs.delete(ids=[note.chroma_id])
-        except Exception as e:
-            logger.warning("删除向量失败: error_type=%s", type(e).__name__)
+    # 按 mysql_id 清理全部历史向量，兼容旧版随机 ID 与失败遗留的重复项。
+    try:
+        _delete_note_vectors(note.id)
+    except Exception as e:
+        logger.warning("删除向量失败: error_type=%s", type(e).__name__)
 
     db.delete(note)
     db.commit()
@@ -147,9 +124,20 @@ def get_notes(db: Session, user_id: str) -> list[SemanticMemory]:
 
 
 def _sync_to_chroma(db: Session, note: SemanticMemory):
-    """将笔记同步到 Chroma"""
+    """用稳定 ID 覆盖当前向量，并清理旧版或失败遗留的向量。"""
     vs = get_semantic_vector_store()
-    chroma_id = vs.add_texts(
+    existing = vs.get(where={"mysql_id": str(note.id)})
+    existing_ids = list(existing.get("ids", [])) if existing else []
+
+    if not note.content.strip():
+        if existing_ids:
+            vs.delete(ids=existing_ids)
+        note.chroma_id = ""
+        db.commit()
+        return
+
+    stable_id = f"semantic-note-{note.id}"
+    vs.add_texts(
         texts=[note.content],
         metadatas=[{
             "user_id": note.user_id,
@@ -157,15 +145,48 @@ def _sync_to_chroma(db: Session, note: SemanticMemory):
             "type": "note",
             "concept": note.concept or "",
             "created_at": note.created_at.isoformat() if note.created_at else "",
+            "updated_at": note.updated_at.isoformat() if note.updated_at else "",
         }],
+        ids=[stable_id],
     )
-    # langchain-chroma add_texts 返回 id 列表
-    if isinstance(chroma_id, list) and chroma_id:
-        note.chroma_id = chroma_id[0]
-        db.commit()
-    elif isinstance(chroma_id, str):
-        note.chroma_id = chroma_id
-        db.commit()
+    legacy_ids = [vector_id for vector_id in existing_ids if vector_id != stable_id]
+    if legacy_ids:
+        vs.delete(ids=legacy_ids)
+    note.chroma_id = stable_id
+    db.commit()
+
+
+def _delete_note_vectors(note_id: int) -> None:
+    """删除同一 MySQL 笔记对应的所有 Chroma 向量。"""
+    vs = get_semantic_vector_store()
+    existing = vs.get(where={"mysql_id": str(note_id)})
+    existing_ids = list(existing.get("ids", [])) if existing else []
+    if existing_ids:
+        vs.delete(ids=existing_ids)
+
+
+def sync_note_index_task(note_id: int, user_id: str) -> None:
+    """后台按笔记串行读取最新 MySQL 内容并同步派生向量。"""
+    from db.database import SessionLocal
+
+    with _NOTE_SYNC_LOCKS[note_id]:
+        db = SessionLocal()
+        try:
+            note = db.query(SemanticMemory).filter(
+                SemanticMemory.id == note_id,
+                SemanticMemory.user_id == user_id,
+            ).first()
+            if note is not None:
+                _sync_to_chroma(db, note)
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                "笔记向量后台同步失败: note_id=%s error_type=%s",
+                note_id,
+                type(e).__name__,
+            )
+        finally:
+            db.close()
 
 
 def compensation_task(db: Session):
@@ -173,16 +194,17 @@ def compensation_task(db: Session):
     notes = db.query(SemanticMemory).filter(
         SemanticMemory.chroma_id.is_(None),
     ).all()
+    synced_count = 0
     for note in notes:
-        # 先检查 Chroma 是否已有该 mysql_id 的向量
-        vs = get_semantic_vector_store()
-        existing = vs.get(where={"mysql_id": str(note.id)})
-        if existing and existing.get("ids"):
-            # 已有，直接更新 chroma_id
-            note.chroma_id = existing["ids"][0]
-            db.commit()
-        else:
-            # 没有，写入
+        try:
             _sync_to_chroma(db, note)
+            synced_count += 1
+        except Exception as e:
+            db.rollback()
+            logger.warning(
+                "补偿单条笔记失败: note_id=%s error_type=%s",
+                note.id,
+                type(e).__name__,
+            )
     if notes:
-        logger.info(f"补偿任务完成: 补写了 {len(notes)} 条笔记到 Chroma")
+        logger.info("补偿任务完成: 成功同步 %s/%s 条笔记", synced_count, len(notes))
