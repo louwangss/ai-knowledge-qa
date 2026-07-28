@@ -110,6 +110,14 @@ class NoteResponse(BaseModel):
         from_attributes = True
 
 
+class NoteSummary(BaseModel):
+    id: int
+    concept: str | None
+
+    class Config:
+        from_attributes = True
+
+
 # ---- Bootstrap ----
 
 class BootstrapDocument(BaseModel):
@@ -138,6 +146,15 @@ class BootstrapNote(BaseModel):
         from_attributes = True
 
 
+class BootstrapActiveNote(BaseModel):
+    id: int
+    concept: str | None
+    content: str
+
+    class Config:
+        from_attributes = True
+
+
 class BootstrapMessage(BaseModel):
     role: str
     content: str
@@ -150,4 +167,5 @@ class BootstrapResponse(BaseModel):
     documents: list[BootstrapDocument]
     sessions: list[BootstrapSession]
     notes: list[BootstrapNote]
+    active_note: BootstrapActiveNote | None = None
     history: list[BootstrapMessage]

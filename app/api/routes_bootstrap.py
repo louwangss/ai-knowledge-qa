@@ -35,6 +35,17 @@ def get_bootstrap(
         SemanticMemory.user_id == user_id,
     ).order_by(SemanticMemory.created_at.desc()).all()
 
+    active_note = None
+    if notes:
+        active_note = db.query(
+            SemanticMemory.id,
+            SemanticMemory.concept,
+            SemanticMemory.content,
+        ).filter(
+            SemanticMemory.id == notes[0].id,
+            SemanticMemory.user_id == user_id,
+        ).first()
+
     history = []
     if sessions:
         history = db.query(ChatHistory.role, ChatHistory.content).filter(
@@ -46,5 +57,6 @@ def get_bootstrap(
         "documents": documents,
         "sessions": sessions,
         "notes": notes,
+        "active_note": active_note,
         "history": history,
     }

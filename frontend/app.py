@@ -17,6 +17,9 @@ APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "").strip()
 APP_USER_ID = os.getenv("APP_USER_ID", "default-user").strip()
 GRADIO_HOST = os.getenv("GRADIO_HOST", "127.0.0.1").strip()
 
+# Gradio 没有原生 debounce 参数；这是可调的体验型默认值，后续按真实输入轨迹校准。
+NOTE_AUTOSAVE_DELAY_MS = 800
+
 
 # ---- API 调用 ----
 
@@ -145,10 +148,26 @@ async def api_delete_document(user_id: str, doc_id: str) -> str:
 async def api_list_notes(user_id: str) -> list[tuple]:
     """获取笔记列表，返回 Radio 选项 [(label, value), ...]"""
     async with _api_client() as client:
-        resp = await client.get(f"{API_URL}/api/v1/notes", params={"user_id": user_id})
+        resp = await client.get(
+            f"{API_URL}/api/v1/notes/summaries",
+            params={"user_id": user_id},
+        )
         resp.raise_for_status()
         notes = resp.json()
     return [(n["concept"] or "无标题", n["id"]) for n in notes]
+
+
+async def api_get_note(user_id: str, note_id: int) -> dict | None:
+    """按 ID 读取单篇笔记，避免切换时下载全部正文。"""
+    async with _api_client() as client:
+        resp = await client.get(
+            f"{API_URL}/api/v1/notes/{note_id}",
+            params={"user_id": user_id},
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
 
 
 async def api_save_note(user_id: str, concept: str, content: str, note_id) -> tuple[str, int | None]:
@@ -160,18 +179,18 @@ async def api_save_note(user_id: str, concept: str, content: str, note_id) -> tu
                 params={"user_id": user_id},
                 json={"concept": concept, "content": content},
             )
-            if resp.status_code == 409:
-                return f"已有类似笔记: {resp.json().get('detail', '')}", note_id
-            resp.raise_for_status()
+            if resp.is_error:
+                detail = resp.json().get("detail", "保存失败")
+                raise RuntimeError(detail if isinstance(detail, str) else "保存失败")
             return "更新成功", note_id
         else:
             resp = await client.post(
                 f"{API_URL}/api/v1/notes",
                 json={"user_id": user_id, "concept": concept, "content": content},
             )
-            if resp.status_code == 409:
-                return f"已有类似笔记: {resp.json().get('detail', '')}", None
-            resp.raise_for_status()
+            if resp.is_error:
+                detail = resp.json().get("detail", "创建失败")
+                raise RuntimeError(detail if isinstance(detail, str) else "创建失败")
             new_id = resp.json().get("id")
             return "保存成功", new_id
 
@@ -186,6 +205,31 @@ async def api_delete_note(user_id: str, note_id) -> str:
         )
         resp.raise_for_status()
         return "删除成功"
+
+
+def note_snapshot(concept: str | None, content: str | None) -> str:
+    """生成无分隔符歧义的编辑快照，用于跳过无变化保存。"""
+    return json.dumps([concept or "", content or ""], ensure_ascii=False, separators=(",", ":"))
+
+
+async def persist_note_if_dirty(
+    user_id: str,
+    note_id: int | None,
+    concept: str,
+    content: str,
+    expected_snapshot: str,
+) -> tuple[bool, str, str]:
+    """只保存发生变化的当前笔记，并保留失败前的快照用于重试。"""
+    current_snapshot = note_snapshot(concept, content)
+    if current_snapshot == expected_snapshot:
+        return True, "已保存", expected_snapshot
+    if not user_id or not note_id:
+        return False, "笔记尚未就绪", expected_snapshot
+    try:
+        await api_save_note(user_id, concept, content, note_id)
+    except Exception:
+        return False, "保存失败，内容仍保留在编辑器中", expected_snapshot
+    return True, "已保存", current_snapshot
 
 
 async def api_get_documents_dropdown(user_id: str) -> dict:
@@ -296,6 +340,17 @@ async def init_app():
             (note.get("concept") or "无标题", note["id"])
             for note in bootstrap["notes"]
         ]
+        active_note = bootstrap.get("active_note")
+        if active_note:
+            active_note_id = active_note["id"]
+            active_concept = active_note.get("concept") or ""
+            active_content = active_note.get("content") or ""
+            active_status = "✓ 已保存"
+        else:
+            active_note_id = None
+            active_concept = ""
+            active_content = ""
+            active_status = "请选择或新建一篇笔记"
         docs = _documents_table(document_data)
         doc_choices = _documents_dropdown(document_data)
 
@@ -318,9 +373,14 @@ async def init_app():
             doc_choices,
             gr.update(choices=session_items, value=session_id),
             chatbot_init,
-            gr.update(choices=notes),
+            gr.update(choices=notes, value=active_note_id),
             notes,
             "就绪",
+            active_note_id,
+            active_concept,
+            active_content,
+            active_status,
+            note_snapshot(active_concept, active_content),
         )
     except Exception:
         return (
@@ -333,31 +393,151 @@ async def init_app():
             gr.update(),
             [],
             "初始化失败，请检查后端服务和认证配置",
+            None,
+            "",
+            "",
+            "初始化失败",
+            note_snapshot("", ""),
         )
 
 
 # ---- Gradio 界面 ----
 
+APP_CSS = """
+    :root {
+        --app-bg: #f4f5f7;
+        --surface: #ffffff;
+        --surface-muted: #f7f7f5;
+        --text-primary: #202124;
+        --text-secondary: #6b7280;
+        --border: #e5e7eb;
+        --accent: #0f766e;
+        --accent-hover: #115e59;
+        --danger: #b42318;
+    }
+    body, .gradio-container { background: var(--app-bg) !important; }
+    .gradio-container { max-width: none !important; padding: 0 !important; }
+    .app-header {
+        display: flex; align-items: center; justify-content: space-between;
+        min-height: 4rem; padding: 0 2rem; background: var(--surface);
+        border-bottom: 1px solid var(--border);
+    }
+    .app-brand { display: flex; align-items: center; gap: .75rem; }
+    .app-mark {
+        display: grid; place-items: center; width: 2rem; height: 2rem;
+        border-radius: .5rem; background: var(--accent); color: white;
+        font-size: .875rem; font-weight: 700;
+    }
+    .app-title { color: var(--text-primary); font-size: 1rem; font-weight: 650; }
+    .app-subtitle { color: var(--text-secondary); font-size: .75rem; }
+    .service-state { color: #166534; font-size: .8125rem; }
+    .workspace-tabs { max-width: 96rem; margin: 0 auto; padding: 0 1.5rem 1.5rem; }
+    .workspace-tabs > .tab-nav { background: transparent !important; padding-top: .5rem; }
+    button.primary { background: var(--accent) !important; border-color: var(--accent) !important; }
+    button.primary:hover { background: var(--accent-hover) !important; }
+    .notes-workspace {
+        gap: 0 !important; min-height: calc(100vh - 9.5rem);
+        overflow: hidden; border: 1px solid var(--border); border-radius: .75rem;
+        background: var(--surface); box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+    }
+    .note-sidebar {
+        min-height: calc(100vh - 9.5rem); padding: 1rem !important;
+        background: var(--surface-muted); border-right: 1px solid var(--border);
+        flex-wrap: nowrap !important;
+    }
+    .note-sidebar > div, .note-sidebar .form { background: var(--surface-muted) !important; }
+    .note-sidebar-header { align-items: center !important; margin-bottom: .5rem; }
+    .note-sidebar-title h2 { margin: 0 !important; font-size: 1rem !important; }
+    .new-note-button { min-width: 2.5rem !important; max-width: 2.5rem !important; }
+    .note-list { flex: 1; overflow-y: auto; border: 0 !important; background: transparent !important; }
+    .note-list > div, .note-list .wrap, .note-list .form {
+        border: 0 !important; background: transparent !important; box-shadow: none !important;
+    }
+    .note-list label {
+        display: flex !important; width: 100% !important; min-height: 2.5rem;
+        align-items: center !important; padding: .625rem .75rem !important;
+        border: 0 !important; border-radius: .5rem !important;
+        background: transparent !important; cursor: pointer !important;
+        transition: background-color .15s ease !important;
+    }
+    .note-list label:hover { background: #ececea !important; }
+    .note-list label:has(input:checked) {
+        background: #e2e8e7 !important; color: #134e4a !important; font-weight: 600 !important;
+    }
+    .note-list input[type="radio"] { display: none !important; }
+    .note-list span { overflow: hidden; font-size: .875rem !important; text-overflow: ellipsis; white-space: nowrap; }
+    .note-editor { min-height: calc(100vh - 9.5rem); padding: 1.25rem 3rem 3rem !important; }
+    .note-editor-toolbar { align-items: center !important; min-height: 2.5rem; }
+    .note-editor-actions {
+        flex: 0 0 auto !important; flex-wrap: nowrap !important;
+        justify-content: flex-end !important; align-items: center !important;
+    }
+    .note-editor-actions button { flex: 0 0 auto !important; width: auto !important; }
+    #note-save-status { color: var(--text-secondary); font-size: .8125rem; }
+    #note-save-status p { margin: 0 !important; }
+    .note-delete-button { color: var(--text-secondary) !important; }
+    .note-delete-button:hover { color: var(--danger) !important; border-color: #fda29b !important; }
+    #note-title { margin-top: 1.75rem; }
+    #note-title, #note-title > div, #note-title .wrap,
+    #note-content, #note-content > div, #note-content .wrap {
+        border: 0 !important; background: transparent !important; box-shadow: none !important;
+    }
+    #note-title textarea, #note-title input {
+        min-height: 3.5rem !important; padding: 0 !important; border: 0 !important;
+        background: transparent !important; box-shadow: none !important;
+        color: var(--text-primary) !important; font-size: 2rem !important;
+        font-weight: 700 !important; line-height: 1.25 !important;
+    }
+    #note-content { margin-top: 1rem; }
+    #note-content textarea {
+        min-height: calc(100vh - 18rem) !important; padding: 0 !important;
+        border: 0 !important; background: transparent !important; box-shadow: none !important;
+        color: #374151 !important; font-size: 1rem !important; line-height: 1.75 !important;
+        resize: none !important;
+    }
+    #note-title textarea:focus, #note-title input:focus, #note-content textarea:focus {
+        outline: none !important; box-shadow: none !important;
+    }
+    .visually-hidden-trigger {
+        position: fixed !important; left: -10000px !important; width: 1px !important;
+        height: 1px !important; overflow: hidden !important; visibility: hidden !important;
+    }
+    footer { display: none !important; }
+    @media (max-width: 48rem) {
+        .app-header { padding: 0 1rem; }
+        .app-subtitle, .service-state { display: none; }
+        .workspace-tabs { padding: 0 .75rem .75rem; }
+        .notes-workspace { min-height: auto; }
+        .note-sidebar { min-height: auto; max-height: 16rem; border-right: 0; border-bottom: 1px solid var(--border); }
+        .note-editor { min-height: 32rem; padding: 1rem 1.25rem 2rem !important; }
+        #note-title textarea, #note-title input { font-size: 1.625rem !important; }
+    }
+"""
+
+
 def build_ui():
-    with gr.Blocks(title="AI 知识库问答", css="""
-        .note-sidebar { max-height: 520px; flex-wrap: nowrap !important; }
-        .note-list { max-height: 440px; overflow-y: auto; }
-        .note-list label { display: flex !important; width: 100% !important;
-            padding: 6px 10px !important; border-radius: 4px !important;
-            cursor: pointer !important; border: none !important;
-            background: transparent !important; transition: background 0.15s !important; }
-        .note-list label:hover { background: rgba(0,0,0,0.04) !important; }
-        .note-list input[type="radio"] { display: none !important; }
-        .note-list label:has(input:checked) { background: rgba(0,0,0,0.06) !important; font-weight: 500 !important; }
-        .note-list span { font-size: 14px !important; }
-    """) as app:
+    with gr.Blocks(title="AI 知识库问答", css=APP_CSS) as app:
         user_id_state = gr.State("")
         session_id_state = gr.State("")
         note_id_state = gr.State(None)
-        _expected_content = gr.State("")  # 加载笔记时记录内容快照，防误触发 auto_save
+        _expected_content = gr.State(note_snapshot("", ""))
         _notes_choices = gr.State([])  # 当前笔记列表选项
 
-        with gr.Tab("💬 对话"):
+        gr.HTML("""
+            <header class="app-header">
+                <div class="app-brand">
+                    <span class="app-mark" aria-hidden="true">K</span>
+                    <div>
+                        <div class="app-title">知识助手</div>
+                        <div class="app-subtitle">对话、资料与笔记集中管理</div>
+                    </div>
+                </div>
+                <div class="service-state">● 本地服务已连接</div>
+            </header>
+        """, padding=False)
+
+        with gr.Tabs(elem_classes=["workspace-tabs"]):
+          with gr.Tab("对话"):
             with gr.Row():
                 # 左侧：会话列表
                 with gr.Column(scale=1, min_width=200):
@@ -405,29 +585,64 @@ def build_ui():
                     doc_dropdown = gr.Dropdown(label="选择文档删除", choices=[], interactive=True)
                     delete_doc_btn = gr.Button("删除文档", variant="stop")
 
-        with gr.Tab("📝 笔记"):
-            with gr.Row():
-                # 左侧：笔记列表（Notion 风格）
-                with gr.Column(scale=1, min_width=200, elem_classes=["note-sidebar"]):
-                    with gr.Row():
-                        new_note_btn = gr.Button("＋ 新建笔记", variant="primary", size="sm")
-                        delete_note_btn = gr.Button("🗑", variant="stop", size="sm")
-                    note_list = gr.Radio(label="笔记列表", choices=[], interactive=True,
-                                         elem_classes=["note-list"])
-
-                # 右侧：编辑区（始终可编辑，自动保存）
-                with gr.Column(scale=4):
-                    concept_input = gr.Textbox(
-                        label="标题", placeholder="选择笔记或点新建...",
+          with gr.Tab("笔记"):
+            with gr.Row(elem_classes=["notes-workspace"]):
+                with gr.Column(scale=1, min_width=240, elem_classes=["note-sidebar"]):
+                    with gr.Row(elem_classes=["note-sidebar-header"]):
+                        gr.Markdown("## 我的笔记", elem_classes=["note-sidebar-title"])
+                        new_note_btn = gr.Button(
+                            "＋", variant="primary", size="sm",
+                            elem_classes=["new-note-button"],
+                        )
+                    note_list = gr.Radio(
+                        label="笔记列表",
+                        show_label=False,
+                        choices=[],
                         interactive=True,
+                        elem_classes=["note-list"],
+                    )
+
+                with gr.Column(scale=4, elem_classes=["note-editor"]):
+                    with gr.Row(elem_classes=["note-editor-toolbar"]):
+                        note_status = gr.Markdown("已保存", elem_id="note-save-status")
+                        with gr.Row(elem_classes=["note-editor-actions"], scale=0):
+                            retry_note_btn = gr.Button(
+                                "重试保存", size="sm", visible=False, scale=0, min_width=80,
+                            )
+                            delete_note_btn = gr.Button(
+                                "删除", size="sm", visible=True,
+                                elem_classes=["note-delete-button"], scale=0, min_width=64,
+                            )
+                            confirm_delete_note_btn = gr.Button(
+                                "确认删除", variant="stop", size="sm", visible=False,
+                                scale=0, min_width=80,
+                            )
+                            cancel_delete_note_btn = gr.Button(
+                                "取消", size="sm", visible=False, scale=0, min_width=64,
+                            )
+                    concept_input = gr.Textbox(
+                        placeholder="无标题",
+                        show_label=False,
+                        container=False,
+                        lines=1,
+                        max_lines=1,
+                        max_length=100,
+                        interactive=True,
+                        elem_id="note-title",
                     )
                     content_input = gr.Textbox(
-                        label="内容",
-                        lines=25,
-                        placeholder="开始输入...",
+                        placeholder="开始记录你的想法……",
+                        show_label=False,
+                        container=False,
+                        lines=22,
                         interactive=True,
+                        elem_id="note-content",
                     )
-                    note_status = gr.Markdown("")
+                    autosave_trigger = gr.Button(
+                        "自动保存",
+                        elem_id="note-autosave-trigger",
+                        elem_classes=["visually-hidden-trigger"],
+                    )
 
         # ---- 事件绑定 ----
 
@@ -435,7 +650,9 @@ def build_ui():
         app.load(
             fn=init_app,
             outputs=[user_id_state, session_id_state, docs_table, doc_dropdown,
-                     session_dropdown, chatbot, note_list, _notes_choices, status_md],
+                     session_dropdown, chatbot, note_list, _notes_choices, status_md,
+                     note_id_state, concept_input, content_input, note_status,
+                     _expected_content],
         )
 
         # 发送消息（完成后刷新会话列表，更新标题）
@@ -495,100 +712,211 @@ def build_ui():
             outputs=[upload_status, docs_table, doc_dropdown],
         )
 
-        # 选择笔记 → 加载到编辑器
-        async def on_select_note(note_id_val, user_id):
-            if not note_id_val:
-                return None, "", "", "", ""
-            if note_id_val == -1:
-                return None, "", "", "新笔记，开始输入即可保存", "|||"
-            async with _api_client() as client:
-                resp = await client.get(f"{API_URL}/api/v1/notes", params={"user_id": user_id})
-                resp.raise_for_status()
-                notes = resp.json()
-            for n in notes:
-                if n["id"] == note_id_val:
-                    concept = n.get("concept", "")
-                    content = n["content"]
-                    return n["id"], concept, content, "", f"{concept}|||{content}"
-            return None, "", "", "笔记未找到", ""
+        def _updated_note_choices(choices, note_id_val, concept):
+            label = (concept or "").strip() or "无标题"
+            return [
+                (label if value == note_id_val else old_label, value)
+                for old_label, value in (choices or [])
+            ]
 
-        note_list.change(
-            on_select_note,
-            inputs=[note_list, user_id_state],
-            outputs=[note_id_state, concept_input, content_input, note_status, _expected_content],
+        async def _load_note(note_id_val, user_id):
+            if not note_id_val or not user_id:
+                return None, "", "", "请选择或新建一篇笔记", note_snapshot("", "")
+            note = await api_get_note(user_id, note_id_val)
+            if note is None:
+                return None, "", "", "笔记未找到", note_snapshot("", "")
+            concept = note.get("concept") or ""
+            content = note.get("content") or ""
+            return note["id"], concept, content, "已保存", note_snapshot(concept, content)
+
+        async def _on_auto_save(user_id, note_id_val, concept, content, expected, choices):
+            success, status, snapshot = await persist_note_if_dirty(
+                user_id, note_id_val, concept, content, expected,
+            )
+            if success:
+                updated_choices = _updated_note_choices(choices, note_id_val, concept)
+                return (
+                    f"✓ {status}", snapshot, gr.update(visible=False),
+                    gr.update(choices=updated_choices, value=note_id_val), updated_choices,
+                )
+            return (
+                f"⚠ {status}", snapshot, gr.update(visible=True),
+                gr.update(), gr.update(),
+            )
+
+        autosave_trigger.click(
+            _on_auto_save,
+            inputs=[user_id_state, note_id_state, concept_input, content_input,
+                    _expected_content, _notes_choices],
+            outputs=[note_status, _expected_content, retry_note_btn, note_list, _notes_choices],
+            api_name="save_note_if_dirty",
+            trigger_mode="always_last",
+            concurrency_limit=1,
+            concurrency_id="note-autosave",
+            show_progress="hidden",
+        )
+        retry_note_btn.click(
+            _on_auto_save,
+            inputs=[user_id_state, note_id_state, concept_input, content_input,
+                    _expected_content, _notes_choices],
+            outputs=[note_status, _expected_content, retry_note_btn, note_list, _notes_choices],
+            api_name=False,
+            trigger_mode="always_last",
+            concurrency_limit=1,
+            concurrency_id="note-autosave",
+            show_progress="hidden",
         )
 
-        # 新建笔记 → 本地列表添加，不调 API（避免 10 秒等待）
-        def on_new_note(current_choices):
-            # 已有未保存的临时笔记（-1）时，直接选中它，避免重复创建
-            choices = current_choices or []
-            if any(v == -1 for _, v in choices):
-                return (None, "", "", "已有未保存的新笔记，请先编辑或删除",
-                        gr.update(), gr.update(choices=choices, value=-1), choices)
-            new_choices = [("📝 新笔记", -1)] + choices
-            return (None, "", "", "新笔记，开始输入即可保存",
-                    "|||", gr.update(choices=new_choices, value=-1), new_choices)
+        schedule_autosave_js = f"""
+            () => {{
+                const statusRoot = document.querySelector('#note-save-status');
+                const statusText = statusRoot?.querySelector('p') || statusRoot;
+                if (statusText) statusText.textContent = '● 未保存';
+                window.clearTimeout(window.__noteAutosaveTimer);
+                window.__noteAutosaveTimer = window.setTimeout(() => {{
+                    const trigger = document.querySelector(
+                        '#note-autosave-trigger button, button#note-autosave-trigger'
+                    );
+                    if (trigger) trigger.click();
+                }}, {NOTE_AUTOSAVE_DELAY_MS});
+            }}
+        """
+        concept_input.input(fn=None, js=schedule_autosave_js, queue=False)
+        content_input.input(fn=None, js=schedule_autosave_js, queue=False)
+
+        async def on_switch_note(
+            selected_id, user_id, current_id, concept, content, expected, choices,
+        ):
+            success, status, snapshot = await persist_note_if_dirty(
+                user_id, current_id, concept, content, expected,
+            )
+            if not success:
+                return (
+                    current_id, concept, content, f"⚠ {status}", snapshot,
+                    gr.update(choices=choices, value=current_id), choices,
+                    gr.update(visible=True),
+                )
+            updated_choices = _updated_note_choices(choices, current_id, concept)
+            note_id_val, next_concept, next_content, next_status, next_snapshot = await _load_note(
+                selected_id, user_id,
+            )
+            return (
+                note_id_val, next_concept, next_content, next_status, next_snapshot,
+                gr.update(choices=updated_choices, value=note_id_val), updated_choices,
+                gr.update(visible=False),
+            )
+
+        note_list.input(
+            on_switch_note,
+            inputs=[note_list, user_id_state, note_id_state, concept_input, content_input,
+                    _expected_content, _notes_choices],
+            outputs=[note_id_state, concept_input, content_input, note_status,
+                     _expected_content, note_list, _notes_choices, retry_note_btn],
+            api_name=False,
+            concurrency_limit=1,
+            concurrency_id="note-autosave",
+        )
+
+        async def on_new_note(user_id, current_id, concept, content, expected, choices):
+            success, status, snapshot = await persist_note_if_dirty(
+                user_id, current_id, concept, content, expected,
+            )
+            if not success:
+                return (
+                    current_id, concept, content, f"⚠ {status}", snapshot,
+                    gr.update(choices=choices, value=current_id), choices,
+                    gr.update(visible=True),
+                )
+            updated_choices = _updated_note_choices(choices, current_id, concept)
+            try:
+                _, new_id = await api_save_note(user_id, "", "", None)
+                refreshed_choices = await api_list_notes(user_id)
+            except Exception:
+                return (
+                    current_id, concept, content, "⚠ 新建失败，请重试", snapshot,
+                    gr.update(choices=updated_choices, value=current_id), updated_choices,
+                    gr.update(visible=False),
+                )
+            return (
+                new_id, "", "", "新笔记 · 已保存", note_snapshot("", ""),
+                gr.update(choices=refreshed_choices, value=new_id), refreshed_choices,
+                gr.update(visible=False),
+            )
 
         new_note_btn.click(
             on_new_note,
-            inputs=[_notes_choices],
-            outputs=[note_id_state, concept_input, content_input, note_status, _expected_content, note_list, _notes_choices],
+            inputs=[user_id_state, note_id_state, concept_input, content_input,
+                    _expected_content, _notes_choices],
+            outputs=[note_id_state, concept_input, content_input, note_status,
+                     _expected_content, note_list, _notes_choices, retry_note_btn],
+            api_name=False,
+            concurrency_limit=1,
+            concurrency_id="note-autosave",
         )
 
-        # 自动保存（show_progress=hidden 隐藏加载动画）
-        async def auto_save(user_id, concept, content, note_id_val, expected):
-            current = f"{concept}|||{content}"
-            if current == expected:
-                return "", note_id_val, expected, gr.update(), gr.update()
-            if not user_id or not content.strip():
-                return "内容不能为空", note_id_val, expected, gr.update(), gr.update()
-            real_id = None if note_id_val in (None, -1) else note_id_val
-            try:
-                status, saved_id = await api_save_note(user_id, concept, content, real_id)
-                # 新笔记首次保存 → 刷新列表并选中刚保存的笔记
-                if real_id is None and saved_id:
-                    choices = await api_list_notes(user_id)
-                    return f"✅ {status}", saved_id, current, gr.update(choices=choices, value=saved_id), choices
-                return f"✅ {status}", saved_id, current, gr.update(), gr.update()
-            except Exception as e:
-                return f"❌ {e}", note_id_val, expected, gr.update(), gr.update()
-
-        content_input.change(
-            auto_save,
-            inputs=[user_id_state, concept_input, content_input, note_id_state, _expected_content],
-            outputs=[note_status, note_id_state, _expected_content, note_list, _notes_choices],
-            trigger_mode="always_last",
-            show_progress="hidden",
-        )
-        concept_input.change(
-            auto_save,
-            inputs=[user_id_state, concept_input, content_input, note_id_state, _expected_content],
-            outputs=[note_status, note_id_state, _expected_content, note_list, _notes_choices],
-            trigger_mode="always_last",
-            show_progress="hidden",
-        )
-
-        # 删除笔记（从 note_id_state 读取，而非 note_list Radio）
-        async def on_delete_note(note_id_val, user_id):
-            if not note_id_val or note_id_val == -1:
-                if user_id:
-                    choices = await api_list_notes(user_id)
-                    return "已删除", None, "", "", gr.update(choices=choices, value=None), "", choices
-                return "请选择笔记", None, "", "", gr.update(), "", []
-            try:
-                status = await api_delete_note(user_id, note_id_val)
-            except Exception as e:
-                if user_id:
-                    choices = await api_list_notes(user_id)
-                    return f"删除失败: {e}", None, "", "", gr.update(choices=choices, value=None), "", choices
-                return f"删除失败: {e}", None, "", "", gr.update(), "", []
-            choices = await api_list_notes(user_id)
-            return status, None, "", "", gr.update(choices=choices, value=None), "", choices
+        def on_delete_note_click(note_id_val):
+            if not note_id_val:
+                return "请选择笔记", gr.update(), gr.update(), gr.update()
+            return (
+                "删除后无法恢复",
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=True),
+            )
 
         delete_note_btn.click(
-            on_delete_note,
+            on_delete_note_click,
+            inputs=[note_id_state],
+            outputs=[note_status, delete_note_btn, confirm_delete_note_btn, cancel_delete_note_btn],
+        )
+
+        def on_cancel_delete_note():
+            return (
+                "已取消删除",
+                gr.update(visible=True),
+                gr.update(visible=False),
+                gr.update(visible=False),
+            )
+
+        cancel_delete_note_btn.click(
+            on_cancel_delete_note,
+            outputs=[note_status, delete_note_btn, confirm_delete_note_btn, cancel_delete_note_btn],
+        )
+
+        async def on_confirm_delete_note(note_id_val, user_id):
+            if not note_id_val or not user_id:
+                return (
+                    None, "", "", "请选择笔记", note_snapshot("", ""),
+                    gr.update(), gr.update(), [],
+                    gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
+                )
+            try:
+                await api_delete_note(user_id, note_id_val)
+                choices = await api_list_notes(user_id)
+                next_id = choices[0][1] if choices else None
+                loaded = await _load_note(next_id, user_id)
+                return (
+                    loaded[0], loaded[1], loaded[2],
+                    "笔记已删除" if next_id else "笔记已删除，新建一篇开始记录",
+                    loaded[4], gr.update(choices=choices, value=next_id),
+                    gr.update(visible=False), choices,
+                    gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
+                )
+            except Exception:
+                return (
+                    note_id_val, gr.update(), gr.update(), "删除失败，请重试", gr.update(),
+                    gr.update(), gr.update(), gr.update(),
+                    gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
+                )
+
+        confirm_delete_note_btn.click(
+            on_confirm_delete_note,
             inputs=[note_id_state, user_id_state],
-            outputs=[note_status, note_id_state, concept_input, content_input, note_list, _expected_content, _notes_choices],
+            outputs=[note_id_state, concept_input, content_input, note_status,
+                     _expected_content, note_list, retry_note_btn, _notes_choices,
+                     delete_note_btn, confirm_delete_note_btn, cancel_delete_note_btn],
+            concurrency_limit=1,
+            concurrency_id="note-autosave",
         )
 
         # ---- 会话管理事件 ----
@@ -672,7 +1000,7 @@ def build_ui():
 def run_frontend():
     """使用配置的监听地址启动 Gradio。"""
     ui = build_ui()
-    ui.launch(server_name=GRADIO_HOST, server_port=7860)
+    ui.launch(server_name=GRADIO_HOST, server_port=7860, pwa=False)
 
 
 if __name__ == "__main__":

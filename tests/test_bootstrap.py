@@ -123,6 +123,11 @@ def test_bootstrap_returns_latest_session_snapshot_in_one_response():
         ]
         assert [item["id"] for item in payload["documents"]] == ["ready-document"]
         assert payload["notes"] == [{"id": 1, "concept": "笔记标题"}]
+        assert payload["active_note"] == {
+            "id": 1,
+            "concept": "笔记标题",
+            "content": "笔记内容",
+        }
         assert payload["history"] == [
             {"role": "user", "content": "问题"},
             {"role": "assistant", "content": "回答"},

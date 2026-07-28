@@ -3,11 +3,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.deps import get_db, require_app_user
-from app.models.schemas import NoteCreate, NoteUpdate, NoteResponse
+from app.models.schemas import NoteCreate, NoteResponse, NoteSummary, NoteUpdate
 from db.models import User
 from memory.semantic import (
     create_note,
     delete_note,
+    get_note,
+    get_note_summaries,
     get_notes,
     sync_note_index_task,
     update_note,
@@ -37,6 +39,25 @@ def create_note_endpoint(
 def list_notes(user_id: str = Query(...), db: Session = Depends(get_db)):
     require_app_user(user_id)
     return get_notes(db, user_id)
+
+
+@router.get("/summaries", response_model=list[NoteSummary])
+def list_note_summaries(user_id: str = Query(...), db: Session = Depends(get_db)):
+    require_app_user(user_id)
+    return get_note_summaries(db, user_id)
+
+
+@router.get("/{note_id}", response_model=NoteResponse)
+def get_note_endpoint(
+    note_id: int,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    require_app_user(user_id)
+    note = get_note(db, note_id, user_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    return note
 
 
 @router.put("/{note_id}", response_model=NoteResponse)

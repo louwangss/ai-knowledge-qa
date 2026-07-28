@@ -28,7 +28,10 @@ def test_all_frontend_requests_include_bearer_token(tmp_path, monkeypatch):
         if path == "/api/v1/bootstrap":
             return httpx.Response(
                 200,
-                json={"documents": [], "sessions": [], "notes": [], "history": []},
+                json={
+                    "documents": [], "sessions": [], "notes": [], "history": [],
+                    "active_note": None,
+                },
             )
         if path == "/api/v1/documents" and method == "POST":
             return httpx.Response(
@@ -37,8 +40,13 @@ def test_all_frontend_requests_include_bearer_token(tmp_path, monkeypatch):
             )
         if path == "/api/v1/documents":
             return httpx.Response(200, json=[])
-        if path == "/api/v1/notes" and method == "GET":
+        if path == "/api/v1/notes/summaries" and method == "GET":
             return httpx.Response(200, json=[])
+        if path == "/api/v1/notes/1" and method == "GET":
+            return httpx.Response(
+                200,
+                json={"id": 1, "concept": "标题", "content": "内容"},
+            )
         if path == "/api/v1/notes" and method == "POST":
             return httpx.Response(200, json={"id": 1})
         if path.startswith("/api/v1/notes/") and method == "PUT":
@@ -78,6 +86,7 @@ def test_all_frontend_requests_include_bearer_token(tmp_path, monkeypatch):
         await frontend_app.api_list_documents("u1")
         await frontend_app.api_delete_document("u1", "d1")
         await frontend_app.api_list_notes("u1")
+        await frontend_app.api_get_note("u1", 1)
         await frontend_app.api_save_note("u1", "标题", "内容", None)
         await frontend_app.api_save_note("u1", "标题", "更新", 1)
         await frontend_app.api_delete_note("u1", 1)
@@ -94,10 +103,11 @@ def test_all_frontend_requests_include_bearer_token(tmp_path, monkeypatch):
 
     asyncio.run(exercise_all_requests())
 
-    assert len(captured_requests) == 15
+    assert len(captured_requests) == 16
     assert {
         request.headers.get("authorization") for request in captured_requests
     } == {"Bearer test-access-token"}
+    assert any(request.url.path == "/api/v1/notes/summaries" for request in captured_requests)
 
 
 def test_frontend_initialization_error_does_not_expose_token(monkeypatch):
@@ -143,6 +153,7 @@ def test_frontend_initialization_loads_first_screen_data_in_one_stage(monkeypatc
                 ],
                 "sessions": [{"id": "session-1", "title": "已有会话"}],
                 "notes": [{"id": 1, "concept": "笔记"}],
+                "active_note": {"id": 1, "concept": "笔记", "content": "笔记正文"},
                 "history": [{"role": "user", "content": "历史问题"}],
             },
         )
@@ -160,8 +171,16 @@ def test_frontend_initialization_loads_first_screen_data_in_one_stage(monkeypatc
     assert result[3]["choices"] == [("知识.md (#document)", "document-1")]
     assert result[5] == [{"role": "user", "content": "历史问题"}]
     assert result[6]["choices"] == [("笔记", 1)]
+    assert result[6]["value"] == 1
     assert result[7] == [("笔记", 1)]
     assert result[8] == "就绪"
+    assert result[9:14] == (
+        1,
+        "笔记",
+        "笔记正文",
+        "✓ 已保存",
+        frontend_app.note_snapshot("笔记", "笔记正文"),
+    )
 
 
 def test_session_switch_only_runs_for_user_input():
@@ -174,6 +193,77 @@ def test_session_switch_only_runs_for_user_input():
     )
 
     assert dependency["targets"][0][1] == "input"
+
+
+def test_note_autosave_is_single_debounced_event():
+    from frontend import app as frontend_app
+
+    ui = frontend_app.build_ui()
+    dependencies = [
+        item for item in ui.config["dependencies"]
+        if item["api_name"] == "save_note_if_dirty"
+    ]
+
+    assert len(dependencies) == 1
+    block_fn = ui.fns[dependencies[0]["id"]]
+    assert block_fn.concurrency_id == "note-autosave"
+    assert block_fn.concurrency_limit == 1
+    assert dependencies[0]["trigger_mode"] == "always_last"
+
+
+def test_note_snapshot_does_not_depend_on_a_text_delimiter():
+    from frontend import app as frontend_app
+
+    first = frontend_app.note_snapshot("a|||b", "c")
+    second = frontend_app.note_snapshot("a", "b|||c")
+
+    assert first != second
+
+
+def test_note_save_skips_unchanged_content(monkeypatch):
+    from frontend import app as frontend_app
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("内容没有变化时不应发送请求")
+
+    monkeypatch.setattr(frontend_app, "api_save_note", fail_if_called)
+    snapshot = frontend_app.note_snapshot("标题", "正文")
+
+    result = asyncio.run(
+        frontend_app.persist_note_if_dirty("u1", 1, "标题", "正文", snapshot)
+    )
+
+    assert result == (True, "已保存", snapshot)
+
+
+def test_note_save_accepts_title_only_draft(monkeypatch):
+    from frontend import app as frontend_app
+
+    captured = {}
+
+    async def fake_save(user_id, concept, content, note_id):
+        captured.update(
+            user_id=user_id,
+            concept=concept,
+            content=content,
+            note_id=note_id,
+        )
+        return "更新成功", note_id
+
+    monkeypatch.setattr(frontend_app, "api_save_note", fake_save)
+
+    result = asyncio.run(
+        frontend_app.persist_note_if_dirty("u1", 1, "只有标题", "", "")
+    )
+
+    assert result[0] is True
+    assert result[1] == "已保存"
+    assert captured == {
+        "user_id": "u1",
+        "concept": "只有标题",
+        "content": "",
+        "note_id": 1,
+    }
 
 
 def test_default_bind_hosts_are_loopback():

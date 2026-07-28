@@ -123,6 +123,21 @@ def get_notes(db: Session, user_id: str) -> list[SemanticMemory]:
     ).order_by(SemanticMemory.created_at.desc()).all()
 
 
+def get_note_summaries(db: Session, user_id: str):
+    """只读取列表展示所需字段，避免传输全部笔记正文。"""
+    return db.query(SemanticMemory.id, SemanticMemory.concept).filter(
+        SemanticMemory.user_id == user_id,
+    ).order_by(SemanticMemory.created_at.desc()).all()
+
+
+def get_note(db: Session, note_id: int, user_id: str) -> SemanticMemory | None:
+    """按用户边界读取单篇笔记。"""
+    return db.query(SemanticMemory).filter(
+        SemanticMemory.id == note_id,
+        SemanticMemory.user_id == user_id,
+    ).first()
+
+
 def _sync_to_chroma(db: Session, note: SemanticMemory):
     """用稳定 ID 覆盖当前向量，并清理旧版或失败遗留的向量。"""
     vs = get_semantic_vector_store()
