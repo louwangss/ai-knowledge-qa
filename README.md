@@ -11,14 +11,16 @@
 - **一致性恢复**：Redis 冷恢复不会重复当前消息；LLM 中断只回滚当前 pending turn；完整回答提交后，辅助状态失败不会破坏问答记录。
 - **安全边界**：业务 API 使用 Bearer token，后端固定单一 `APP_USER_ID`；上传有流式大小限制，文档删除失败保留可重试的权威记录。
 - **可观测性**：request/turn ID 串联检索、首 token、完成和失败阶段；日志只记录 ID、计数、耗时、模式与错误类型。
-- **可验证交付**：109 项自动化测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
+- **可验证交付**：129 项 Python 自动化测试、5 项 React 交互测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
 
 ## 架构
 
 ```mermaid
 flowchart LR
     U["用户"] --> G["Gradio :7860"]
+    U --> W["React 笔记页 :5173"]
     G -->|"Bearer + HTTP/SSE"| A["FastAPI :8000"]
+    W -->|"HttpOnly 会话 + REST"| A
 
     A --> M{"问答模式"}
     M -->|"normal"| R["并行上下文检索"]
@@ -59,7 +61,7 @@ Bearer 认证与资源归属校验
 
 | 领域 | 技术 |
 | --- | --- |
-| API / UI | FastAPI、SSE、Gradio、httpx |
+| API / UI | FastAPI、SSE、React、TypeScript、Vite、Gradio、httpx |
 | LLM / Agent | DeepSeek 兼容 API、LangChain、LangGraph |
 | RAG | ChromaDB、`BAAI/bge-small-zh-v1.5`、PyMuPDF、docx2txt |
 | 数据 | MySQL、Redis、SQLAlchemy |
@@ -70,6 +72,7 @@ Bearer 认证与资源归属校验
 ### 1. 环境要求
 
 - Python 3.11+
+- Node.js 22+（独立笔记前端）
 - MySQL 8.x
 - Redis 6.x+
 
@@ -84,6 +87,7 @@ python -m venv venv
 # source venv/bin/activate
 
 python -m pip install -r requirements.txt
+cd web && npm install && cd ..
 ```
 
 ### 2. 配置
@@ -120,13 +124,13 @@ python -m db.init_db
 .\start.bat
 ```
 
-`start.bat` 会优先使用项目的 `venv`，并行拉起前后端并等待后端健康检查通过；按 `Ctrl+C` 会一起关闭两个服务。若已有后端占用 8000 端口，启动器会明确报错，避免连接到错误配置的旧进程。跨平台环境可以直接运行同一启动器：
+`start.bat` 会优先使用项目的 `venv`，并行拉起 FastAPI、Gradio 和 React 笔记页，等待服务健康检查通过后自动打开 `http://127.0.0.1:5173/app/`。启动器使用一次性凭证换取 HttpOnly Cookie，长期 `APP_ACCESS_TOKEN` 不会打包进浏览器。按 `Ctrl+C` 会一起关闭三个服务；若端口已被旧进程占用会明确报错。跨平台环境可以直接运行同一启动器：
 
 ```bash
 python launcher.py
 ```
 
-也可以在两个终端中分别启动，便于单独调试：
+也可以在三个终端中分别启动，便于单独调试：
 
 ```bash
 
@@ -135,9 +139,13 @@ python -m app.main
 
 # 终端二：前端
 python -m frontend.app
+
+# 终端三：独立笔记页
+cd web
+npm run dev
 ```
 
-访问 `http://127.0.0.1:7860`。健康检查位于 `http://127.0.0.1:8000/`，业务 API 位于 `/api/v1/*` 并要求 Bearer token。
+独立笔记页位于 `http://127.0.0.1:5173/app/`，Gradio 问答与文档页仍位于 `http://127.0.0.1:7860`。健康检查位于 `http://127.0.0.1:8000/`；服务端客户端使用 Bearer token，浏览器笔记页使用仅本机签发的 HttpOnly 会话。
 
 ## 验证与实测证据
 
@@ -147,13 +155,18 @@ python -m frontend.app
 python -m pytest -q
 python -m pip check
 python -m compileall -q app agents db evaluation frontend memory rag tools
+cd web
+npm test -- --run
+npm run build
 ```
 
-2026-07-27 在 Python 3.11 本地环境的结果：
+2026-07-28 在 Python 3.11、Node.js 24 和 Edge 本地环境的结果：
 
 | 检查 | 实际结果 |
 | --- | --- |
-| pytest | 109 passed |
+| pytest | 129 passed |
+| React 前端 | 5 passed；TypeScript 检查和 Vite 生产构建通过；npm audit 0 vulnerabilities |
+| Edge 笔记切换 | 6 篇真实笔记：未缓存切换 64–75 ms，缓存切换 19–35 ms；控制台 0 error |
 | 后端模块导入 | 优化前单次冷导入约 20.97 秒；惰性加载后，三次独立进程实测 1.515–1.548 秒 |
 | Gradio 首屏初始化 | 隔离 Edge 同会话三次实测：旧版 5.385 / 3.307 / 3.608 秒；聚合读取后 2.892 / 1.639 / 1.366 秒。完全冷启动仍受 Gradio 进程启动影响，本机单次约 8.2 秒 |
 | pip check | No broken requirements found |

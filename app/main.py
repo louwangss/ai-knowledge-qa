@@ -3,11 +3,13 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes_users import router as users_router
 from app.api.routes_sessions import router as sessions_router
@@ -19,6 +21,7 @@ from app.api.routes_web import router as web_router
 from app.deps import require_api_access
 from app.error_handler import value_error_handler, generic_error_handler
 from app.observability import RequestObservabilityMiddleware
+from app.security_headers import SecurityHeadersMiddleware
 from config import API_HOST
 
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +55,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI 知识库问答系统", lifespan=lifespan)
 app.add_middleware(RequestObservabilityMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # 注册路由
 _protected_dependencies = [Depends(require_api_access)]
@@ -66,6 +70,11 @@ app.include_router(web_router)
 # 错误处理
 app.add_exception_handler(ValueError, value_error_handler)
 app.add_exception_handler(Exception, generic_error_handler)
+
+# 前端构建存在时提供同源静态托管；开发模式仍由 Vite 代理 API。
+WEB_DIST_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
+if WEB_DIST_DIR.is_dir():
+    app.mount("/app", StaticFiles(directory=WEB_DIST_DIR, html=True), name="notes-web")
 
 
 @app.get("/")

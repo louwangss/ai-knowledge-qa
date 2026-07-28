@@ -1,14 +1,17 @@
 """独立 Web 前端的本机会话入口。"""
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app.web_auth import (
     WEB_SESSION_COOKIE,
     exchange_web_credential,
+    has_valid_web_session,
     is_loopback_client,
     require_allowed_web_origin,
 )
+from app.deps import require_api_access
+from config import APP_USER_ID
 
 
 router = APIRouter(prefix="/api/v1/web", tags=["web"])
@@ -16,6 +19,16 @@ router = APIRouter(prefix="/api/v1/web", tags=["web"])
 
 class WebSessionCreate(BaseModel):
     token: str = Field(min_length=1, max_length=512)
+
+
+@router.get("/session/status")
+def get_web_session_status(request: Request):
+    return {"authenticated": has_valid_web_session(request)}
+
+
+@router.get("/config", dependencies=[Depends(require_api_access)])
+def get_web_config():
+    return {"user_id": APP_USER_ID}
 
 
 @router.post("/session", status_code=status.HTTP_204_NO_CONTENT)

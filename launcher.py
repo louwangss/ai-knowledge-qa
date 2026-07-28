@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 import sys
 import time
+import webbrowser
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,14 +29,21 @@ class Service:
     cwd: Path
     process: subprocess.Popen | None = None
     health_url: str | None = None
+    env: dict[str, str] | None = None
 
 
-def build_services() -> list[Service]:
+def build_services(bootstrap_token: str | None = None) -> list[Service]:
     """使用当前 Python 环境构造后端和前端命令。"""
     load_dotenv(PROJECT_ROOT / ".env")
     api_host = os.getenv("API_HOST", "127.0.0.1").strip()
     api_url = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
     python = sys.executable
+    bootstrap_token = bootstrap_token or secrets.token_urlsafe(32)
+    shared_env = os.environ.copy()
+    shared_env.pop("APP_WEB_BOOTSTRAP_TOKEN", None)
+    backend_env = shared_env.copy()
+    backend_env["APP_WEB_BOOTSTRAP_TOKEN"] = bootstrap_token
+    npm_command = "npm.cmd" if os.name == "nt" else "npm"
     return [
         Service(
             name="后端",
@@ -50,13 +59,32 @@ def build_services() -> list[Service]:
             ),
             cwd=PROJECT_ROOT,
             health_url=f"{api_url}/",
+            env=backend_env,
         ),
         Service(
-            name="前端",
+            name="Gradio",
             command=(python, "-m", "frontend.app"),
             cwd=PROJECT_ROOT,
+            env=shared_env.copy(),
+        ),
+        Service(
+            name="笔记前端",
+            command=(npm_command, "run", "dev"),
+            cwd=PROJECT_ROOT / "web",
+            health_url="http://127.0.0.1:5173/app/",
+            env=shared_env.copy(),
         ),
     ]
+
+
+def build_notes_url(services: list[Service]) -> str:
+    """构造带单次启动凭证的前端 URL；长期 access token 不进入 URL。"""
+    backend = next(service for service in services if service.name == "后端")
+    notes = next(service for service in services if service.name == "笔记前端")
+    token = (backend.env or {}).get("APP_WEB_BOOTSTRAP_TOKEN")
+    if not token or not notes.health_url:
+        raise RuntimeError("缺少笔记前端启动凭证")
+    return f"{notes.health_url}#bootstrap={token}"
 
 
 def is_service_ready(health_url: str) -> bool:
@@ -98,7 +126,11 @@ def start_services(services: list[Service]) -> None:
         # 前端导入与界面构建可以和后端启动并行，缩短完整可用时间。
         for service in services:
             print(f"[启动] {service.name}: {' '.join(service.command[1:])}")
-            service.process = subprocess.Popen(service.command, cwd=service.cwd)
+            service.process = subprocess.Popen(
+                service.command,
+                cwd=service.cwd,
+                env=service.env,
+            )
 
         for service in services:
             if service.health_url is not None:
@@ -139,16 +171,20 @@ def stop_services(services: list[Service]) -> None:
 
 def main(services: list[Service] | None = None) -> int:
     """启动并共同管理前后端生命周期。"""
+    should_open_browser = services is None
     services = services or build_services()
     try:
         start_services(services)
-        print("[运行中] 前端 http://127.0.0.1:7860  后端已就绪")
-        print("按 Ctrl+C 可同时关闭前端和后端。")
+        notes_url = build_notes_url(services)
+        if should_open_browser:
+            webbrowser.open(notes_url)
+        print("[运行中] 笔记 http://127.0.0.1:5173/app/  Gradio http://127.0.0.1:7860")
+        print("按 Ctrl+C 可同时关闭全部服务。")
         exited_service, exit_code = wait_for_first_exit(services)
         print(f"[退出] {exited_service.name} 已停止（退出码 {exit_code}），正在关闭其余服务。")
         return exit_code
     except KeyboardInterrupt:
-        print("\n[关闭] 正在停止前端和后端……")
+        print("\n[关闭] 正在停止全部服务……")
         return 0
     except (OSError, RuntimeError) as exc:
         print(f"[错误] 服务启动失败：{exc}", file=sys.stderr)

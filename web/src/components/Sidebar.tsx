@@ -1,0 +1,101 @@
+import type { NoteSummary } from "../types";
+import { ExternalIcon, NoteIcon, PlusIcon, SearchIcon } from "./Icons";
+
+interface SidebarProps {
+  summaries: NoteSummary[];
+  selectedId: number | null;
+  search: string;
+  isOpen: boolean;
+  isCreating: boolean;
+  onSearch: (value: string) => void;
+  onSelect: (id: number) => void;
+  onCreate: () => void;
+  onClose: () => void;
+}
+
+function noteLabel(concept: string | null) {
+  return concept?.trim() || "无标题笔记";
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+}
+
+export function Sidebar({
+  summaries,
+  selectedId,
+  search,
+  isOpen,
+  isCreating,
+  onSearch,
+  onSelect,
+  onCreate,
+  onClose,
+}: SidebarProps) {
+  return (
+    <>
+      <button className={`sidebar-scrim ${isOpen ? "is-visible" : ""}`} aria-label="关闭笔记列表" onClick={onClose} />
+      <aside className={`sidebar ${isOpen ? "is-open" : ""}`} aria-label="笔记导航">
+        <header className="brand-row">
+          <div className="brand-mark" aria-hidden="true">知</div>
+          <div>
+            <strong>知页</strong>
+            <span>Knowledge Notes</span>
+          </div>
+        </header>
+
+        <button className="new-note-button" onClick={onCreate} disabled={isCreating}>
+          <PlusIcon />
+          <span>{isCreating ? "正在创建…" : "新建笔记"}</span>
+          <kbd>Ctrl N</kbd>
+        </button>
+
+        <label className="search-box">
+          <SearchIcon />
+          <span className="sr-only">搜索笔记</span>
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => onSearch(event.target.value)}
+            placeholder="搜索标题"
+          />
+        </label>
+
+        <div className="list-heading">
+          <span>全部笔记</span>
+          <span>{summaries.length}</span>
+        </div>
+
+        <nav className="note-list" aria-label="笔记列表">
+          {summaries.length === 0 ? (
+            <div className="sidebar-empty">
+              <NoteIcon />
+              <p>还没有匹配的笔记</p>
+            </div>
+          ) : summaries.map((note) => (
+            <button
+              key={note.id}
+              className={`note-list-item ${note.id === selectedId ? "is-active" : ""}`}
+              onClick={() => onSelect(note.id)}
+              aria-current={note.id === selectedId ? "page" : undefined}
+              aria-label={`${noteLabel(note.concept)}，${formatDate(note.updated_at)}`}
+            >
+              <NoteIcon />
+              <span className="note-list-copy">
+                <strong>{noteLabel(note.concept)}</strong>
+                <small>{formatDate(note.updated_at)}</small>
+              </span>
+            </button>
+          ))}
+        </nav>
+
+        <a className="gradio-link" href="http://127.0.0.1:7860" target="_blank" rel="noreferrer">
+          <span>返回问答与文档</span>
+          <ExternalIcon />
+        </a>
+      </aside>
+    </>
+  );
+}

@@ -9,6 +9,9 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
+node_modules/
+.npm-cache/
+dist/
 
 # 密钥、证书与本地环境变量
 .env

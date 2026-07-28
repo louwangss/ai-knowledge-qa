@@ -43,6 +43,9 @@ def test_root_is_public(client):
     response = client.get("/")
 
     assert response.status_code == 200
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "no-referrer"
 
 
 def test_protected_route_rejects_missing_token(client):
@@ -156,7 +159,10 @@ def test_openapi_does_not_contain_access_token(client):
     assert "test-access-token" not in response.text
     schema = response.json()
     for path, operations in schema["paths"].items():
-        if not path.startswith("/api/v1/") or path == "/api/v1/web/session":
+        if not path.startswith("/api/v1/") or path in {
+            "/api/v1/web/session",
+            "/api/v1/web/session/status",
+        }:
             continue
         for operation in operations.values():
             assert operation["security"] == [{"AppBearerAuth": []}]
@@ -228,6 +234,9 @@ def test_loopback_bootstrap_creates_httponly_web_session(monkeypatch, mock_db):
     app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+            assert web_client.get("/api/v1/web/session/status").json() == {
+                "authenticated": False
+            }
             login = web_client.post(
                 "/api/v1/web/session",
                 headers={"Origin": "http://127.0.0.1:5173"},
@@ -238,12 +247,18 @@ def test_loopback_bootstrap_creates_httponly_web_session(monkeypatch, mock_db):
             assert "httponly" in cookie
             assert "samesite=strict" in cookie
             assert "single-use-bootstrap" not in cookie
+            assert web_client.get("/api/v1/web/session/status").json() == {
+                "authenticated": True
+            }
 
             response = web_client.get(
                 "/api/v1/sessions",
                 params={"user_id": "u1"},
             )
             assert response.status_code == 200
+            config_response = web_client.get("/api/v1/web/config")
+            assert config_response.status_code == 200
+            assert config_response.json() == {"user_id": "u1"}
     finally:
         clear_web_sessions_for_test()
         app.dependency_overrides.clear()

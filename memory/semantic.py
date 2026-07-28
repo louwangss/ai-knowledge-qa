@@ -83,45 +83,22 @@ def update_note(
     expected_version: str | None = None,
 ) -> SemanticMemory | None:
     """编辑笔记（不做相似度检测）"""
-    note = db.query(SemanticMemory).filter(
+    note_query = db.query(SemanticMemory).filter(
         SemanticMemory.id == note_id,
         SemanticMemory.user_id == user_id,
-    ).first()
+    )
+    if expected_version is not None:
+        # MySQL 行锁让同一笔记的版本检查与写入成为一个原子临界区。
+        note_query = note_query.with_for_update()
+    note = note_query.first()
     if not note:
         return None
 
     if expected_version is not None:
         current_version = build_note_version(note.concept, note.content)
         if current_version != expected_version:
-            raise NoteVersionConflictError
-
-        query = db.query(SemanticMemory).filter(
-            SemanticMemory.id == note_id,
-            SemanticMemory.user_id == user_id,
-            SemanticMemory.content == note.content,
-        )
-        query = query.filter(
-            SemanticMemory.concept.is_(None)
-            if note.concept is None
-            else SemanticMemory.concept == note.concept
-        )
-        changed = query.update(
-            {
-                SemanticMemory.concept: note.concept if concept is None else concept,
-                SemanticMemory.content: note.content if content is None else content,
-                SemanticMemory.updated_at: datetime.utcnow(),
-                SemanticMemory.chroma_id: None,
-            },
-            synchronize_session=False,
-        )
-        if changed != 1:
             db.rollback()
             raise NoteVersionConflictError
-        db.commit()
-        return db.query(SemanticMemory).filter(
-            SemanticMemory.id == note_id,
-            SemanticMemory.user_id == user_id,
-        ).first()
 
     if concept is not None:
         note.concept = concept
