@@ -13,6 +13,7 @@ from memory.semantic import (
     get_notes,
     sync_note_index_task,
     update_note,
+    NoteVersionConflictError,
 )
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
@@ -69,7 +70,23 @@ def update_note_endpoint(
     db: Session = Depends(get_db),
 ):
     require_app_user(user_id)
-    note = update_note(db, note_id, user_id, payload.concept, payload.content)
+    try:
+        note = update_note(
+            db,
+            note_id,
+            user_id,
+            payload.concept,
+            payload.content,
+            expected_version=payload.version,
+        )
+    except NoteVersionConflictError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NOTE_VERSION_CONFLICT",
+                "message": "笔记已在其他位置更新",
+            },
+        )
     if not note:
         raise HTTPException(status_code=404, detail="笔记不存在")
     background_tasks.add_task(sync_note_index_task, note.id, user_id)

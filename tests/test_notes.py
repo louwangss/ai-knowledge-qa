@@ -8,6 +8,7 @@ from sqlalchemy import BigInteger, create_engine
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from fastapi.testclient import TestClient
 
 from app.models.schemas import NoteCreate, NoteUpdate
 from db.database import Base
@@ -165,3 +166,86 @@ def test_delete_note_keeps_mysql_record_when_vector_cleanup_fails(db_session):
             semantic.delete_note(db_session, note.id, "u1")
 
     assert db_session.get(SemanticMemory, note.id) is not None
+
+
+def test_note_api_rejects_stale_version_without_overwriting_content(db_session):
+    """过期自动保存必须返回冲突，不能静默覆盖较新的正文。"""
+    from app.deps import get_db
+    from app.main import app
+
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with patch("app.api.routes_notes.sync_note_index_task"):
+            with TestClient(app) as client:
+                created = client.post(
+                    "/api/v1/notes",
+                    headers={"Authorization": "Bearer test-access-token"},
+                    json={"user_id": "u1", "concept": "标题", "content": "第一版"},
+                )
+                assert created.status_code == 200
+                original_version = created.json()["version"]
+
+                saved = client.put(
+                    f"/api/v1/notes/{created.json()['id']}",
+                    headers={"Authorization": "Bearer test-access-token"},
+                    params={"user_id": "u1"},
+                    json={
+                        "concept": "标题",
+                        "content": "第二版",
+                        "version": original_version,
+                    },
+                )
+                assert saved.status_code == 200
+                assert saved.json()["version"] != original_version
+
+                stale = client.put(
+                    f"/api/v1/notes/{created.json()['id']}",
+                    headers={"Authorization": "Bearer test-access-token"},
+                    params={"user_id": "u1"},
+                    json={
+                        "concept": "被覆盖的标题",
+                        "content": "过期第三版",
+                        "version": original_version,
+                    },
+                )
+                assert stale.status_code == 409
+                assert stale.json()["detail"]["code"] == "NOTE_VERSION_CONFLICT"
+
+                current = client.get(
+                    f"/api/v1/notes/{created.json()['id']}",
+                    headers={"Authorization": "Bearer test-access-token"},
+                    params={"user_id": "u1"},
+                )
+                assert current.json()["content"] == "第二版"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_note_api_keeps_legacy_update_without_version_compatible(db_session):
+    """Gradio 旧客户端不传 version 时仍可保存。"""
+    from app.deps import get_db
+    from app.main import app
+
+    note = semantic.create_note(db_session, "u1", "旧标题", "旧正文")
+
+    def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with patch("app.api.routes_notes.sync_note_index_task"):
+            with TestClient(app) as client:
+                response = client.put(
+                    f"/api/v1/notes/{note.id}",
+                    headers={"Authorization": "Bearer test-access-token"},
+                    params={"user_id": "u1"},
+                    json={"concept": "新标题", "content": "新正文"},
+                )
+        assert response.status_code == 200
+        assert response.json()["content"] == "新正文"
+        assert len(response.json()["version"]) == 64
+    finally:
+        app.dependency_overrides.clear()

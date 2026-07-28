@@ -1,7 +1,7 @@
 """依赖注入：认证、DB session、Redis 连接。"""
 import secrets
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config import APP_ACCESS_TOKEN, APP_USER_ID
@@ -32,6 +32,26 @@ def require_access_token(
             detail="认证失败",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def require_api_access(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> None:
+    """兼容服务端 Bearer 与浏览器 HttpOnly 会话。"""
+    if credentials is not None and _constant_time_equal(
+        credentials.credentials,
+        APP_ACCESS_TOKEN,
+    ):
+        return
+
+    from app.web_auth import has_valid_web_session, require_allowed_web_origin
+
+    if has_valid_web_session(request):
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            require_allowed_web_origin(request)
+        return
+    require_access_token(credentials)
 
 
 def require_app_user(user_id: str) -> str:

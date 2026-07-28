@@ -1,6 +1,8 @@
 """Pydantic 请求/响应模型"""
 from datetime import datetime
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
+
+from app.note_version import build_note_version
 
 
 MAX_NOTE_CONTENT_BYTES = 65_535
@@ -94,6 +96,7 @@ class NoteCreate(BaseModel):
 class NoteUpdate(BaseModel):
     concept: str | None = Field(default=None, max_length=100)
     content: str | None = None
+    version: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     _validate_content = field_validator("content")(_validate_note_content_bytes)
 
@@ -106,6 +109,11 @@ class NoteResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @computed_field
+    @property
+    def version(self) -> str:
+        return build_note_version(self.concept, self.content)
+
     class Config:
         from_attributes = True
 
@@ -113,6 +121,7 @@ class NoteResponse(BaseModel):
 class NoteSummary(BaseModel):
     id: int
     concept: str | None
+    updated_at: datetime
 
     class Config:
         from_attributes = True

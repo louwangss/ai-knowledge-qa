@@ -156,7 +156,7 @@ def test_openapi_does_not_contain_access_token(client):
     assert "test-access-token" not in response.text
     schema = response.json()
     for path, operations in schema["paths"].items():
-        if not path.startswith("/api/v1/"):
+        if not path.startswith("/api/v1/") or path == "/api/v1/web/session":
             continue
         for operation in operations.values():
             assert operation["security"] == [{"AppBearerAuth": []}]
@@ -212,3 +212,83 @@ def test_config_rejects_app_user_id_longer_than_database_column():
 
     assert completed.returncode != 0
     assert "APP_USER_ID 长度不能超过 36" in completed.stderr
+
+
+def test_loopback_bootstrap_creates_httponly_web_session(monkeypatch, mock_db):
+    from app.deps import get_db
+    from app.main import app
+    from app.web_auth import clear_web_sessions_for_test
+
+    monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
+    clear_web_sessions_for_test()
+
+    def override_get_db():
+        yield mock_db
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+            login = web_client.post(
+                "/api/v1/web/session",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"token": "single-use-bootstrap"},
+            )
+            assert login.status_code == 204
+            cookie = login.headers["set-cookie"].lower()
+            assert "httponly" in cookie
+            assert "samesite=strict" in cookie
+            assert "single-use-bootstrap" not in cookie
+
+            response = web_client.get(
+                "/api/v1/sessions",
+                params={"user_id": "u1"},
+            )
+            assert response.status_code == 200
+    finally:
+        clear_web_sessions_for_test()
+        app.dependency_overrides.clear()
+
+
+def test_cookie_write_rejects_untrusted_origin(monkeypatch, mock_db):
+    from app.deps import get_db
+    from app.main import app
+    from app.web_auth import clear_web_sessions_for_test
+
+    monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
+    clear_web_sessions_for_test()
+
+    def override_get_db():
+        yield mock_db
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+            assert web_client.post(
+                "/api/v1/web/session",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"token": "single-use-bootstrap"},
+            ).status_code == 204
+
+            response = web_client.post(
+                "/api/v1/sessions",
+                headers={"Origin": "http://evil.example"},
+                json={"user_id": "u1"},
+            )
+            assert response.status_code == 403
+    finally:
+        clear_web_sessions_for_test()
+        app.dependency_overrides.clear()
+
+
+def test_web_session_rejects_non_loopback_client(monkeypatch):
+    from app.main import app
+
+    monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
+    with TestClient(app, client=("192.0.2.8", 51000)) as external_client:
+        response = external_client.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "single-use-bootstrap"},
+        )
+
+    assert response.status_code == 403

@@ -15,7 +15,8 @@ from app.api.routes_documents import router as documents_router
 from app.api.routes_notes import router as notes_router
 from app.api.routes_chat import router as chat_router
 from app.api.routes_bootstrap import router as bootstrap_router
-from app.deps import require_access_token
+from app.api.routes_web import router as web_router
+from app.deps import require_api_access
 from app.error_handler import value_error_handler, generic_error_handler
 from app.observability import RequestObservabilityMiddleware
 from config import API_HOST
@@ -53,13 +54,14 @@ app = FastAPI(title="AI 知识库问答系统", lifespan=lifespan)
 app.add_middleware(RequestObservabilityMiddleware)
 
 # 注册路由
-_protected_dependencies = [Depends(require_access_token)]
+_protected_dependencies = [Depends(require_api_access)]
 app.include_router(users_router, dependencies=_protected_dependencies)
 app.include_router(sessions_router, dependencies=_protected_dependencies)
 app.include_router(documents_router, dependencies=_protected_dependencies)
 app.include_router(notes_router, dependencies=_protected_dependencies)
 app.include_router(chat_router, dependencies=_protected_dependencies)
 app.include_router(bootstrap_router, dependencies=_protected_dependencies)
+app.include_router(web_router)
 
 # 错误处理
 app.add_exception_handler(ValueError, value_error_handler)

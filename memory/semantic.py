@@ -7,11 +7,16 @@ from threading import Lock
 from sqlalchemy.orm import Session
 
 from db.models import SemanticMemory
+from app.note_version import build_note_version
 
 logger = logging.getLogger(__name__)
 
 _SIMILARITY_DISTANCE_THRESHOLD = 0.15  # 余弦距离 <= 此值认为重复
 _NOTE_SYNC_LOCKS: defaultdict[int, Lock] = defaultdict(Lock)
+
+
+class NoteVersionConflictError(Exception):
+    """客户端基于过期内容尝试保存。"""
 
 
 def get_semantic_vector_store():
@@ -75,6 +80,7 @@ def update_note(
     user_id: str,
     concept: str | None,
     content: str | None,
+    expected_version: str | None = None,
 ) -> SemanticMemory | None:
     """编辑笔记（不做相似度检测）"""
     note = db.query(SemanticMemory).filter(
@@ -83,6 +89,39 @@ def update_note(
     ).first()
     if not note:
         return None
+
+    if expected_version is not None:
+        current_version = build_note_version(note.concept, note.content)
+        if current_version != expected_version:
+            raise NoteVersionConflictError
+
+        query = db.query(SemanticMemory).filter(
+            SemanticMemory.id == note_id,
+            SemanticMemory.user_id == user_id,
+            SemanticMemory.content == note.content,
+        )
+        query = query.filter(
+            SemanticMemory.concept.is_(None)
+            if note.concept is None
+            else SemanticMemory.concept == note.concept
+        )
+        changed = query.update(
+            {
+                SemanticMemory.concept: note.concept if concept is None else concept,
+                SemanticMemory.content: note.content if content is None else content,
+                SemanticMemory.updated_at: datetime.utcnow(),
+                SemanticMemory.chroma_id: None,
+            },
+            synchronize_session=False,
+        )
+        if changed != 1:
+            db.rollback()
+            raise NoteVersionConflictError
+        db.commit()
+        return db.query(SemanticMemory).filter(
+            SemanticMemory.id == note_id,
+            SemanticMemory.user_id == user_id,
+        ).first()
 
     if concept is not None:
         note.concept = concept
@@ -123,7 +162,11 @@ def get_notes(db: Session, user_id: str) -> list[SemanticMemory]:
 
 def get_note_summaries(db: Session, user_id: str):
     """只读取列表展示所需字段，避免传输全部笔记正文。"""
-    return db.query(SemanticMemory.id, SemanticMemory.concept).filter(
+    return db.query(
+        SemanticMemory.id,
+        SemanticMemory.concept,
+        SemanticMemory.updated_at,
+    ).filter(
         SemanticMemory.user_id == user_id,
     ).order_by(SemanticMemory.created_at.desc()).all()
 
