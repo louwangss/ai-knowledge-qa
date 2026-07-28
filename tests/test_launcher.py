@@ -17,10 +17,51 @@ def test_service_commands_use_current_python_and_project_root():
     assert all(service.cwd == project_root for service in services[:2])
     assert services[0].command[1:4] == ("-m", "uvicorn", "app.main:app")
     assert services[1].command[1:] == ("-m", "frontend.app")
+    assert services[1].health_url == "http://127.0.0.1:7860/"
     assert services[2].command[1:] == ("run", "dev")
     assert services[2].cwd.name == "web"
     assert services[0].env["APP_WEB_BOOTSTRAP_TOKEN"]
     assert "APP_WEB_BOOTSTRAP_TOKEN" not in services[2].env
+
+
+def test_main_reuses_an_existing_complete_stack(monkeypatch):
+    import launcher
+
+    services = launcher.build_services()
+    opened_urls = []
+
+    monkeypatch.setattr(launcher, "build_services", lambda: services)
+    monkeypatch.setattr(launcher, "is_service_ready", lambda _: True)
+    monkeypatch.setattr(
+        launcher,
+        "start_services",
+        lambda _: pytest.fail("完整服务已运行时不应重复启动"),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "stop_services",
+        lambda _: pytest.fail("不应关闭复用的外部服务"),
+    )
+    monkeypatch.setattr(launcher.webbrowser, "open", opened_urls.append)
+
+    exit_code = launcher.main()
+
+    assert exit_code == 0
+    assert opened_urls == ["http://127.0.0.1:5173/app/"]
+
+
+def test_incomplete_existing_stack_is_not_reused(monkeypatch):
+    import launcher
+
+    services = launcher.build_services()
+    ready_url = services[0].health_url
+    monkeypatch.setattr(
+        launcher,
+        "is_service_ready",
+        lambda health_url: health_url == ready_url,
+    )
+
+    assert launcher.get_running_stack_url(services) is None
 
 
 def test_main_stops_both_services_when_one_exits(monkeypatch):
@@ -80,7 +121,7 @@ def test_frontend_starts_while_backend_is_becoming_ready(monkeypatch):
 
     assert events == [
         "启动后端", "启动Gradio", "启动笔记前端",
-        "等待后端就绪", "等待笔记前端就绪",
+        "等待后端就绪", "等待Gradio就绪", "等待笔记前端就绪",
     ]
 
 

@@ -65,6 +65,7 @@ def build_services(bootstrap_token: str | None = None) -> list[Service]:
             name="Gradio",
             command=(python, "-m", "frontend.app"),
             cwd=PROJECT_ROOT,
+            health_url="http://127.0.0.1:7860/",
             env=shared_env.copy(),
         ),
         Service(
@@ -94,6 +95,18 @@ def is_service_ready(health_url: str) -> bool:
             return response.status == 200
     except (OSError, URLError):
         return False
+
+
+def get_running_stack_url(services: list[Service]) -> str | None:
+    """完整服务栈已经运行时，返回可直接打开的 Web 工作区地址。"""
+    if not services or any(
+        not service.health_url or not is_service_ready(service.health_url)
+        for service in services
+    ):
+        return None
+
+    notes = next(service for service in services if service.name == "笔记前端")
+    return notes.health_url
 
 
 def wait_for_service_ready(service: Service) -> None:
@@ -173,6 +186,12 @@ def main(services: list[Service] | None = None) -> int:
     """启动并共同管理前后端生命周期。"""
     should_open_browser = services is None
     services = services or build_services()
+    running_stack_url = get_running_stack_url(services) if should_open_browser else None
+    if running_stack_url:
+        webbrowser.open(running_stack_url)
+        print("[已运行] 检测到现有服务，已直接打开 React 工作区。")
+        return 0
+
     try:
         start_services(services)
         notes_url = build_notes_url(services)
