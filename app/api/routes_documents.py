@@ -13,9 +13,6 @@ from app.deps import get_db, require_app_user
 from app.models.schemas import DocumentResponse
 from config import MAX_UPLOAD_BYTES, UPLOAD_DIR
 from db.models import Document, User
-from rag.loader import load_document
-from rag.splitter import split_text
-from rag.vector_store import add_documents_to_rag, delete_documents_by_mysql_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
@@ -24,6 +21,34 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 ALLOWED_EXTS = {".pdf", ".docx", ".md", ".txt", ".html", ".htm"}
+
+
+def load_document(file_path: str):
+    """按需加载文档解析依赖，并保留稳定的测试替换点。"""
+    from rag.loader import load_document as load
+
+    return load(file_path)
+
+
+def split_text(documents):
+    """按需加载文本分块依赖。"""
+    from rag.splitter import split_text as split
+
+    return split(documents)
+
+
+def add_documents_to_rag(**kwargs):
+    """按需加载向量写入依赖。"""
+    from rag.vector_store import add_documents_to_rag as add
+
+    return add(**kwargs)
+
+
+def delete_documents_by_mysql_id(mysql_id: str):
+    """按需加载向量删除依赖。"""
+    from rag.vector_store import delete_documents_by_mysql_id as delete
+
+    return delete(mysql_id)
 
 
 def _normalize_filename(filename: str | None) -> tuple[str, str]:

@@ -6,7 +6,6 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config import APP_ACCESS_TOKEN, APP_USER_ID
 from db.database import get_db
-from memory.short_term import get_redis
 
 _bearer_scheme = HTTPBearer(
     auto_error=False,

@@ -1,15 +1,32 @@
 """并行检索：所有记忆源并行查询，合并返回"""
+from __future__ import annotations
+
 import asyncio
 import logging
-
-from langchain_chroma import Chroma
+from typing import TYPE_CHECKING
 
 from db.database import SessionLocal
-from rag.vector_store import get_rag_vector_store, get_semantic_vector_store
 from memory.episodic import get_recent_events
 from memory.short_term import get_short_term_memory, get_redis
 
+if TYPE_CHECKING:
+    from langchain_chroma import Chroma
+
 logger = logging.getLogger(__name__)
+
+
+def get_rag_vector_store():
+    """首次检索时再加载 Chroma 与 embedding 依赖。"""
+    from rag.vector_store import get_rag_vector_store as get_store
+
+    return get_store()
+
+
+def get_semantic_vector_store():
+    """首次检索时再加载语义记忆向量库。"""
+    from rag.vector_store import get_semantic_vector_store as get_store
+
+    return get_store()
 
 
 def _sync_chroma_search(

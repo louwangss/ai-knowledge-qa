@@ -5,11 +5,17 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from db.models import SemanticMemory
-from rag.vector_store import get_semantic_vector_store, get_embeddings
 
 logger = logging.getLogger(__name__)
 
 _SIMILARITY_DISTANCE_THRESHOLD = 0.15  # 余弦距离 <= 此值认为重复
+
+
+def get_semantic_vector_store():
+    """首次处理笔记向量时再加载 Chroma 与 embedding 依赖。"""
+    from rag.vector_store import get_semantic_vector_store as get_store
+
+    return get_store()
 
 
 def check_similarity(db: Session, user_id: str, content: str) -> SemanticMemory | None:

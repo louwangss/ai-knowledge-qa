@@ -63,11 +63,27 @@ def test_backend_becomes_ready_before_frontend_starts(monkeypatch):
 
     services = launcher.build_services()
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launcher, "is_service_ready", lambda _: False)
     monkeypatch.setattr(launcher, "wait_for_service_ready", fake_wait_for_ready)
 
     launcher.start_services(services)
 
     assert events == ["启动后端", "等待后端就绪", "启动前端"]
+
+
+def test_start_services_rejects_an_existing_backend(monkeypatch):
+    import launcher
+
+    services = launcher.build_services()
+    monkeypatch.setattr(launcher, "is_service_ready", lambda _: True)
+
+    def unexpected_popen(*args, **kwargs):
+        raise AssertionError("端口已被占用时不应创建新进程")
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", unexpected_popen)
+
+    with pytest.raises(RuntimeError, match="后端地址已被占用"):
+        launcher.start_services(services)
 
 
 def test_readiness_check_reports_backend_early_exit():

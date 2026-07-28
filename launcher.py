@@ -59,6 +59,15 @@ def build_services() -> list[Service]:
     ]
 
 
+def is_service_ready(health_url: str) -> bool:
+    """判断健康接口是否已经可访问。"""
+    try:
+        with urlopen(health_url) as response:
+            return response.status == 200
+    except (OSError, URLError):
+        return False
+
+
 def wait_for_service_ready(service: Service) -> None:
     """等待服务健康接口可访问，或在进程提前退出时报错。"""
     if service.process is None or service.health_url is None:
@@ -70,19 +79,20 @@ def wait_for_service_ready(service: Service) -> None:
             raise RuntimeError(
                 f"{service.name}启动失败（退出码 {exit_code}），请查看上方日志"
             )
-        try:
-            with urlopen(service.health_url) as response:
-                if response.status == 200:
-                    print(f"[就绪] {service.name}: {service.health_url}")
-                    return
-        except (OSError, URLError):
-            time.sleep(0.1)
+        if is_service_ready(service.health_url):
+            print(f"[就绪] {service.name}")
+            return
+        time.sleep(0.1)
 
 
 def start_services(services: list[Service]) -> None:
     """依次启动服务；启动失败时回收已创建的进程。"""
     try:
         for service in services:
+            if service.health_url is not None and is_service_ready(service.health_url):
+                raise RuntimeError(
+                    f"{service.name}地址已被占用，请先关闭旧服务"
+                )
             print(f"[启动] {service.name}: {' '.join(service.command[1:])}")
             service.process = subprocess.Popen(service.command, cwd=service.cwd)
             if service.health_url is not None:
