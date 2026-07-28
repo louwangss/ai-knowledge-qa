@@ -3,7 +3,6 @@ fastapi
 uvicorn
 sse-starlette
 python-multipart
-gradio
 httpx
 
 # LLM / Agent

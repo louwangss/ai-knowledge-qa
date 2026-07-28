@@ -128,3 +128,18 @@
 - [x] Task 21：集成与真实浏览器验收。
   - [x] 18 项 React 测试、类型检查、构建与 137 项 Python 回归通过。
   - [x] Edge 真实上传/索引/删除自动清理，控制台与凭据检查通过。
+
+## Phase 7：React 独立运行与原型前端退役
+
+- [x] Task 22：后端固定用户自举与双服务启动。
+  - [x] FastAPI lifespan 幂等创建 `APP_USER_ID` 用户，并覆盖并发插入与 Session 释放。
+  - [x] `start.bat` 只管理 FastAPI 与 React，React 中移除备用入口。
+  - [x] 142 项 Python、19 项 React 测试及生产构建通过，形成提交 `7bcf779`。
+- [x] Task 23：删除已无调用方的旧前端运行时。
+  - [x] 删除旧前端源码、专用测试、依赖和环境变量。
+  - [x] 删除 `/api/v1/users`、`/api/v1/bootstrap` 及专用 schema。
+  - [x] README、任务计划、CI 与离线评测样本切换到 React 架构。
+- [x] Task 24：最终回归与交付。
+  - [x] 126 项 Python、19 项 React 测试、生产构建、源码编译、`pip check` 与离线评测通过。
+  - [x] Edge 验证问答与笔记桌面/移动页面；控制台无错误或警告，浏览器存储和 URL 无凭证，界面无旧入口。
+  - [x] 安全扫描、差异审查与第二阶段 Git 提交完成。

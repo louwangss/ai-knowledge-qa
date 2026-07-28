@@ -11,16 +11,14 @@
 - **一致性恢复**：Redis 冷恢复不会重复当前消息；LLM 中断只回滚当前 pending turn；完整回答提交后，辅助状态失败不会破坏问答记录。
 - **安全边界**：业务 API 使用 Bearer token，后端固定单一 `APP_USER_ID`；上传有流式大小限制，文档删除失败保留可重试的权威记录。
 - **可观测性**：request/turn ID 串联检索、首 token、完成和失败阶段；日志只记录 ID、计数、耗时、模式与错误类型。
-- **可验证交付**：137 项 Python 自动化测试、18 项 React 交互与安全渲染测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
+- **可验证交付**：Python 与 React 自动化测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    U["用户"] --> G["Gradio :7860"]
-    U --> W["React 问答/笔记/文档工作区 :5173"]
-    G -->|"Bearer + HTTP/SSE"| A["FastAPI :8000"]
-    W -->|"HttpOnly 会话 + REST/SSE"| A
+    U["用户"] --> W["React 问答/笔记/文档工作区 :5173"]
+    W -->|"HttpOnly 会话 + REST/SSE"| A["FastAPI :8000"]
 
     A --> M{"问答模式"}
     M -->|"normal"| R["并行上下文检索"]
@@ -61,7 +59,7 @@ Bearer 认证与资源归属校验
 
 | 领域 | 技术 |
 | --- | --- |
-| API / UI | FastAPI、SSE、React、TypeScript、Vite、Gradio、httpx |
+| API / UI | FastAPI、SSE、React、TypeScript、Vite、httpx |
 | LLM / Agent | DeepSeek 兼容 API、LangChain、LangGraph |
 | RAG | ChromaDB、`BAAI/bge-small-zh-v1.5`、PyMuPDF、docx2txt |
 | 数据 | MySQL、Redis、SQLAlchemy |
@@ -102,11 +100,11 @@ cp .env.example .env
 | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | 是 | LLM API 凭据 |
 | `MYSQL_*` | 是 | MySQL 连接配置 |
-| `APP_ACCESS_TOKEN` | 是 | Gradio 调用业务 API 的 Bearer token，应使用足够长的随机值 |
+| `APP_ACCESS_TOKEN` | 是 | 服务端 API 的 Bearer token，也可在本机手动换取 Web 会话；应使用足够长的随机值 |
 | `APP_USER_ID` | 是 | 服务端允许访问的固定单用户 ID |
 | `REDIS_*` | 否 | Redis 连接配置，密码可留空 |
 | `TAVILY_API_KEY` | 否 | 非空时允许 normal Agent 使用联网搜索 |
-| `API_HOST` / `GRADIO_HOST` | 否 | 默认均为 `127.0.0.1` |
+| `API_HOST` | 否 | FastAPI 监听地址，默认 `127.0.0.1` |
 | `MAX_UPLOAD_BYTES` | 否 | 默认 25 MiB，是当前单机演示的可调整启发式值 |
 
 可用以下命令生成 token：
@@ -124,28 +122,25 @@ python -m db.init_db
 .\start.bat
 ```
 
-`start.bat` 会优先使用项目的 `venv`，并行拉起 FastAPI、Gradio 和 React Web 工作区，等待服务健康检查通过后自动打开 `http://127.0.0.1:5173/app/`。启动器使用一次性凭证换取 HttpOnly Cookie，长期 `APP_ACCESS_TOKEN` 不会打包进浏览器。按 `Ctrl+C` 会一起关闭三个服务；若端口已被旧进程占用会明确报错。跨平台环境可以直接运行同一启动器：
+`start.bat` 会优先使用项目的 `venv`，并行拉起 FastAPI 和 React Web 工作区，等待服务健康检查通过后自动打开 `http://127.0.0.1:5173/app/`。启动器使用一次性凭证换取 HttpOnly Cookie，长期 `APP_ACCESS_TOKEN` 不会打包进浏览器。按 `Ctrl+C` 会一起关闭两个服务；若端口已被旧进程占用会明确报错。跨平台环境可以直接运行同一启动器：
 
 ```bash
 python launcher.py
 ```
 
-也可以在三个终端中分别启动，便于单独调试：
+也可以在两个终端中分别启动，便于单独调试：
 
 ```bash
 
 # 终端一：后端
 python -m app.main
 
-# 终端二：前端
-python -m frontend.app
-
-# 终端三：独立 React 工作区
+# 终端二：React 工作区
 cd web
 npm run dev
 ```
 
-独立问答/笔记/文档工作区位于 `http://127.0.0.1:5173/app/`，Gradio 仍作为备用入口位于 `http://127.0.0.1:7860`。健康检查位于 `http://127.0.0.1:8000/`；服务端客户端使用 Bearer token，浏览器工作区使用仅本机签发的 HttpOnly 会话。
+问答、笔记和文档管理均位于 `http://127.0.0.1:5173/app/`。健康检查位于 `http://127.0.0.1:8000/`；服务端客户端使用 Bearer token，浏览器工作区使用仅本机签发的 HttpOnly 会话。后端启动时会幂等创建 `APP_USER_ID` 对应的固定用户，新数据库无需先访问某个前端页面来完成用户初始化。
 
 ## 验证与实测证据
 
@@ -154,7 +149,7 @@ npm run dev
 ```bash
 python -m pytest -q
 python -m pip check
-python -m compileall -q app agents db evaluation frontend memory rag tools
+python -m compileall -q app agents db evaluation memory rag tools
 cd web
 npm test -- --run
 npm run build
@@ -164,13 +159,12 @@ npm run build
 
 | 检查 | 实际结果 |
 | --- | --- |
-| pytest | 137 passed |
-| React 前端 | 18 passed；覆盖笔记、会话、文档上传/删除、normal/deep、SSE 任意分块和安全 Markdown；TypeScript 检查和 Vite 生产构建通过；npm audit 0 vulnerabilities |
-| Edge 笔记切换 | 6 篇真实笔记：未缓存切换 64–75 ms，缓存切换 19–35 ms；控制台 0 error |
+| pytest | 126 passed |
+| React 前端 | 19 passed；覆盖笔记、会话、文档上传/删除、normal/deep、SSE 任意分块和安全 Markdown；TypeScript 检查和 Vite 生产构建通过并纳入 CI |
+| Edge 笔记切换 | 9 篇真实笔记：未缓存切换 70 ms，缓存切换 19 ms；控制台 0 error |
 | Edge React 问答 | 真实 normal/deep SSE 流程完成；桌面与 390 px 移动布局通过；控制台 0 error/warning，浏览器存储与 URL 无凭证 |
 | Edge React 文档 | 真实上传、索引和删除闭环完成并自动清理；1440/768/320 px 无横向溢出，控制台 0 error/warning，浏览器存储与 URL 无凭证 |
 | 后端模块导入 | 优化前单次冷导入约 20.97 秒；惰性加载后，三次独立进程实测 1.515–1.548 秒 |
-| Gradio 首屏初始化 | 隔离 Edge 同会话三次实测：旧版 5.385 / 3.307 / 3.608 秒；聚合读取后 2.892 / 1.639 / 1.366 秒。完全冷启动仍受 Gradio 进程启动影响，本机单次约 8.2 秒 |
 | pip check | No broken requirements found |
 | 本地服务联调 | 根路径 200；带正确 token 的空测试用户会话查询 200；Redis PING 成功 |
 | 故障路径 | 覆盖 Redis miss、LLM 中断、超限上传、Chroma 删除失败、跨用户访问和摘要会话删除 |
@@ -219,15 +213,15 @@ python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 ## 安全边界与已知限制
 
 - Bearer token + 固定 `APP_USER_ID` 是单用户演示边界，不是注册、密码、角色、刷新 token 或完整多租户认证。
-- Gradio 本身没有独立登录。即使业务 API 有 token，外部监听也只适用于可信局域网；公网部署前应增加 HTTPS、反向代理认证、限流和网络访问控制。
-- 默认监听 `127.0.0.1`；不要直接暴露 FastAPI 的 8000 端口或 Gradio 的 7860 端口。
+- Web 会话只解决本机单用户演示的浏览器凭证隔离，不是完整多租户认证；公网部署前应增加 HTTPS、正式身份认证、限流和网络访问控制。
+- FastAPI 与 Vite 默认只监听 `127.0.0.1`；不要直接把开发服务端口暴露到公网。
 - Chroma 的用户隔离依赖 metadata filter，而不是物理分库；当前后端再通过固定用户 ID 限制访问。
 - 系统未实现恶意文件扫描、复杂内容沙箱、全链路指标后端、告警、自动备份恢复演练或生产级容量验证。
 - 25 MiB 上传上限来自当前单机演示约束，部署前应以真实文档的解析耗时、峰值内存和 embedding 成本重新校准。
 
 ## 适合简历的表述参考
 
-> 设计并实现基于 React、FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持文档上传管理、normal/deep 双模式 SSE 流式回答、会话缓存和笔记自动保存；修复跨存储状态一致性与并行 Session 问题，引入 HttpOnly 本机会话、流式上传限制和低敏感 turn 级可观测性，并以 137 项 Python、18 项 React 测试、无密钥 CI 与可复现离线评测固化工程证据。
+> 设计并实现基于 React、FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持文档上传管理、normal/deep 双模式 SSE 流式回答、会话缓存和笔记自动保存；修复跨存储状态一致性与并行 Session 问题，引入 HttpOnly 本机会话、流式上传限制和低敏感 turn 级可观测性，并以 Python/React 自动化测试、无密钥 CI 与可复现离线评测固化工程证据。
 
 面试时建议重点解释三个取舍：为什么 MySQL 是权威数据源、为什么 Chroma/Redis 失败采用可恢复策略、为什么公开评测基线不能等同于线上模型质量。
 
@@ -238,7 +232,6 @@ agents/       LangGraph 深度研究工作流
 app/          FastAPI 路由、认证、错误处理、SSE 与可观测性
 db/           SQLAlchemy 模型、连接与建表脚本
 evaluation/   公开数据集、无密钥评测 CLI 和实际结果
-frontend/     Gradio 薄客户端
 memory/       短期、情景和语义记忆
 rag/          Loader、Splitter、Chroma、Retriever 与 LLM 封装
 tests/        自动化测试

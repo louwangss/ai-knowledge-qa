@@ -15,21 +15,6 @@ def _validate_note_content_bytes(value: str | None) -> str | None:
     return value
 
 
-# ---- User ----
-
-class UserCreate(BaseModel):
-    username: str
-
-
-class UserResponse(BaseModel):
-    id: str
-    username: str
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 # ---- Session ----
 
 class SessionCreate(BaseModel):
@@ -125,56 +110,3 @@ class NoteSummary(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-# ---- Bootstrap ----
-
-class BootstrapDocument(BaseModel):
-    id: str
-    filename: str
-    chunk_count: int | None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class BootstrapSession(BaseModel):
-    id: str
-    title: str | None
-
-    class Config:
-        from_attributes = True
-
-
-class BootstrapNote(BaseModel):
-    id: int
-    concept: str | None
-
-    class Config:
-        from_attributes = True
-
-
-class BootstrapActiveNote(BaseModel):
-    id: int
-    concept: str | None
-    content: str
-
-    class Config:
-        from_attributes = True
-
-
-class BootstrapMessage(BaseModel):
-    role: str
-    content: str
-
-    class Config:
-        from_attributes = True
-
-
-class BootstrapResponse(BaseModel):
-    documents: list[BootstrapDocument]
-    sessions: list[BootstrapSession]
-    notes: list[BootstrapNote]
-    active_note: BootstrapActiveNote | None = None
-    history: list[BootstrapMessage]

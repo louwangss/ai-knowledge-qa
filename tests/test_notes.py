@@ -225,7 +225,7 @@ def test_note_api_rejects_stale_version_without_overwriting_content(db_session):
 
 
 def test_note_api_keeps_legacy_update_without_version_compatible(db_session):
-    """Gradio 旧客户端不传 version 时仍可保存。"""
+    """旧版 API 客户端不传 version 时仍可保存。"""
     from app.deps import get_db
     from app.main import app
 

@@ -17,7 +17,7 @@
     },
     {
       "source": "security_boundary.md",
-      "content": "单用户演示版 API 使用 Bearer access token 认证，并把可访问用户固定为服务端配置的 APP_USER_ID。FastAPI 和 Gradio 默认只监听 127.0.0.1，避免无意暴露到外部网络。"
+      "content": "单用户演示版的服务端 API 使用 Bearer access token 认证，React 浏览器工作区使用仅本机签发的 HttpOnly 会话，并把可访问用户固定为服务端配置的 APP_USER_ID。FastAPI 和 Vite 开发服务默认只监听 127.0.0.1，避免无意暴露到外部网络。"
     }
   ],
   "cases": [
@@ -43,7 +43,7 @@
       "id": "safe-default-bind",
       "question": "演示服务如何避免默认暴露到外部网络？",
       "expected_sources": ["security_boundary.md"],
-      "reference_answer": "根据《security_boundary.md》，FastAPI 与 Gradio 默认只监听 127.0.0.1，并由 Bearer token 保护业务 API。"
+      "reference_answer": "根据《security_boundary.md》，FastAPI 与 Vite 开发服务默认只监听 127.0.0.1；服务端 API 使用 Bearer token，React 工作区使用本机 HttpOnly 会话。"
     }
   ]
 }

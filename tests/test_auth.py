@@ -177,15 +177,6 @@ def test_other_user_id_is_rejected_before_resource_access(
     assert response.status_code == 403
 
 
-def test_user_endpoint_returns_fixed_app_user_id(mock_db):
-    from app.api.routes_users import create_user
-    from app.models.schemas import UserCreate
-
-    user = create_user(UserCreate(username="user"), db=mock_db)
-
-    assert user.id == "u1"
-
-
 def test_openapi_does_not_contain_access_token(client):
     response = client.get("/openapi.json")
 

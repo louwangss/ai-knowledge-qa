@@ -348,3 +348,32 @@ Web HttpOnly 会话
 - 删除采用确认和乐观更新，失败时恢复原条目；处理中的临时条目不可删除。
 - 1440/768/320 px 无横向溢出，控制台无 error/warning，浏览器存储和 URL 无凭据。
 - React 全量测试、生产构建、Python 全量回归、真实文档 E2E 和 `git diff --check` 通过。
+
+## 12. Phase 7：React 独立运行与原型前端退役
+
+### 目标与边界
+
+React 已覆盖问答、笔记和文档管理后，移除重复的原型前端及其专用聚合接口。保留 FastAPI 的 REST/SSE 契约、Web HttpOnly 会话、Bearer 服务端认证和所有用户权威数据；不迁移或改写 MySQL、Redis、Chroma 与用户文件。
+
+### 状态流与取舍
+
+```text
+start.bat
+  -> launcher.py 生成单次启动凭证
+  -> 并行启动 FastAPI 与 React/Vite
+  -> FastAPI lifespan 幂等创建 APP_USER_ID 固定用户
+  -> 浏览器用单次凭证换取 HttpOnly 会话
+  -> React 直接消费 REST/SSE
+```
+
+- 用户初始化属于服务端不变量，在 FastAPI 启动时完成，不依赖任何页面访问。
+- 删除只服务旧前端的 `/api/v1/users` 与 `/api/v1/bootstrap`，减少无调用方的 API 面。
+- 保留 `httpx` 作为 FastAPI/Starlette 测试客户端的直接测试依赖；删除不再使用的 UI 依赖。
+- 第一阶段规格保留为带归档标记的历史记录，现行 README 与任务计划统一更新为 React 架构。
+
+### 验收标准
+
+- `start.bat` 只启动 FastAPI 与 React，首次数据库状态无需访问旧页面即可使用。
+- 运行时代码、依赖、环境示例和现行文档不再包含已退役前端入口。
+- Python/React 全量测试、生产构建、源码编译、依赖一致性、离线评测和真实浏览器主工作区验收通过。
+- 两阶段形成独立中文 Git 提交，不提交未跟踪的用户文件，不自动 push。

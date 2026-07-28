@@ -11,12 +11,10 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes_users import router as users_router
 from app.api.routes_sessions import router as sessions_router
 from app.api.routes_documents import router as documents_router
 from app.api.routes_notes import router as notes_router
 from app.api.routes_chat import router as chat_router
-from app.api.routes_bootstrap import router as bootstrap_router
 from app.api.routes_web import router as web_router
 from app.deps import require_api_access
 from app.error_handler import value_error_handler, generic_error_handler
@@ -61,12 +59,10 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # 注册路由
 _protected_dependencies = [Depends(require_api_access)]
-app.include_router(users_router, dependencies=_protected_dependencies)
 app.include_router(sessions_router, dependencies=_protected_dependencies)
 app.include_router(documents_router, dependencies=_protected_dependencies)
 app.include_router(notes_router, dependencies=_protected_dependencies)
 app.include_router(chat_router, dependencies=_protected_dependencies)
-app.include_router(bootstrap_router, dependencies=_protected_dependencies)
 app.include_router(web_router)
 
 # 错误处理

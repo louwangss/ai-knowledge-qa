@@ -23,11 +23,27 @@ def test_requirements_declares_direct_langchain_integrations():
         assert package in requirements
 
 
+def test_gradio_runtime_is_fully_retired():
+    requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "gradio" not in requirements
+    assert not (PROJECT_ROOT / "frontend" / "app.py").exists()
+    assert "Gradio" not in readme
+
+    from app.main import app
+
+    paths = app.openapi()["paths"]
+    assert "/api/v1/bootstrap" not in paths
+    assert "/api/v1/users" not in paths
+
+
 def test_readme_documents_security_and_evaluation_limits():
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "Bearer" in readme
-    assert "Gradio 本身没有独立登录" in readme
+    assert "HttpOnly" in readme
+    assert "完整多租户认证" in readme
     assert "deterministic-char-bigram-v1" in readme
     assert "不代表生产数据分布" in readme
     assert "C:\\Users\\" not in readme

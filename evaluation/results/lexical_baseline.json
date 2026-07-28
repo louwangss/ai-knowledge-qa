@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "evaluated_at": "2026-07-27T06:03:54.294621Z",
+  "evaluated_at": "2026-07-28T17:38:05.121117Z",
   "dataset": {
     "id": "aiqa-public-mini-v1",
     "version": "1.0.0",
-    "sha256": "44a55a0d46251c7d28b26729cee07106e02b406ac725fa04519482610c89def6",
+    "sha256": "8a9e036de5db6e3f599308738243a5f6b7dfbeace061a9987b5c285a29a7db5e",
     "document_count": 4,
     "case_count": 4
   },
@@ -48,7 +48,7 @@
       ],
       "scores": [
         0.346552,
-        0.047114
+        0.038962
       ],
       "retrieval_hit": true,
       "reference_citations": [
@@ -83,7 +83,7 @@
         "rag_intro.md"
       ],
       "scores": [
-        0.242821,
+        0.240966,
         0.025924
       ],
       "retrieval_hit": true,
