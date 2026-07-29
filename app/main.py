@@ -25,7 +25,7 @@ from app.startup import (
     initialize_app_user,
     recover_interrupted_chat_turns,
 )
-from config import API_HOST
+from config import API_HOST, INDEX_JOB_POLL_SECONDS
 from db.schema import assert_schema_ready
 
 logging.basicConfig(level=logging.INFO)
@@ -33,19 +33,17 @@ logger = logging.getLogger(__name__)
 
 
 async def _compensation_loop():
-    """后台补偿：每 5 分钟扫描 chroma_id IS NULL 的笔记"""
+    """轮询 MySQL 持久化任务；进程重启后会继续未完成或租约过期的工作。"""
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(INDEX_JOB_POLL_SECONDS)
         try:
-            from db.database import SessionLocal
-            from memory.semantic import compensation_task
-            db = SessionLocal()
-            try:
-                compensation_task(db)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error("补偿任务失败: error_type=%s", type(e).__name__)
+            from indexing.jobs import process_pending_index_jobs
+
+            completed, attempted = await asyncio.to_thread(process_pending_index_jobs)
+            if attempted:
+                logger.info("索引补偿完成: completed=%s attempted=%s", completed, attempted)
+        except Exception as exc:
+            logger.error("索引补偿任务失败: error_type=%s", type(exc).__name__)
 
 
 @asynccontextmanager

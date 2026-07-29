@@ -1,6 +1,6 @@
 """ORM 模型定义"""
 from datetime import datetime
-from sqlalchemy import BigInteger, Column, DateTime, Float, ForeignKey, Integer, String, Text, TIMESTAMP
+from sqlalchemy import BigInteger, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, TIMESTAMP, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from db.database import Base
@@ -49,6 +49,8 @@ class Document(Base):
     chunk_overlap = Column(Integer, nullable=False)
     content_hash = Column(String(64), nullable=False)
     status = Column(String(20), default="processing")
+    index_version = Column(Integer, nullable=False, default=1)
+    indexed_version = Column(Integer, nullable=False, default=0)
     created_at = Column(TIMESTAMP, default=datetime.utcnow)
 
     user = relationship("User", back_populates="documents")
@@ -149,10 +151,42 @@ class SemanticMemory(Base):
     concept = Column(String(100))
     content = Column(Text, nullable=False)
     chroma_id = Column(String(100))
+    index_version = Column(Integer, nullable=False, default=1)
+    indexed_version = Column(Integer, nullable=False, default=0)
+    index_state = Column(String(20), nullable=False, default="pending")
     created_at = Column(TIMESTAMP, default=datetime.utcnow)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="semantic_memories")
+
+
+class IndexJob(Base):
+    """MySQL 中的持久化索引任务；Chroma 仅保存可重建的派生状态。"""
+    __tablename__ = "index_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_type",
+            "entity_id",
+            "operation",
+            "desired_version",
+            name="uq_index_job_target_version",
+        ),
+        Index("idx_index_job_available", "status", "next_attempt_at", "lease_expires_at"),
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    entity_type = Column(String(20), nullable=False)
+    entity_id = Column(String(64), nullable=False)
+    operation = Column(String(20), nullable=False)
+    desired_version = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    lease_owner = Column(String(36), nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_error_type = Column(String(100), nullable=True)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class SessionSummary(Base):

@@ -61,11 +61,15 @@ def add_documents_to_rag(
     source: str,
     chunks: list[Document],
     created_at: str,
+    index_version: int = 1,
 ):
-    """向 RAG 文档库添加文档分块"""
+    """使用稳定 ID 幂等覆盖文档分块，并清理旧版本或多余分块。"""
     vs = get_rag_vector_store()
+    existing = vs.get(where={"mysql_id": mysql_id})
+    existing_ids = set(existing.get("ids", [])) if existing else set()
     metadatas = []
-    for chunk in chunks:
+    stable_ids = [f"document-{mysql_id}-chunk-{index}" for index in range(len(chunks))]
+    for index, chunk in enumerate(chunks):
         meta = dict(chunk.metadata) if chunk.metadata else {}
         meta.update({
             "user_id": user_id,
@@ -73,12 +77,19 @@ def add_documents_to_rag(
             "type": "document",
             "source": source,
             "created_at": created_at,
+            "index_version": index_version,
+            "chunk_index": index,
         })
         metadatas.append(meta)
-    vs.add_texts(
-        texts=[c.page_content for c in chunks],
-        metadatas=metadatas,
-    )
+    if chunks:
+        vs.add_texts(
+            texts=[c.page_content for c in chunks],
+            metadatas=metadatas,
+            ids=stable_ids,
+        )
+    stale_ids = sorted(existing_ids - set(stable_ids))
+    if stale_ids:
+        vs.delete(ids=stale_ids)
 
 
 def delete_documents_by_mysql_id(mysql_id: str):

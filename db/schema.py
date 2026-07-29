@@ -14,6 +14,18 @@ from db.models import SchemaVersion
 
 CURRENT_SCHEMA_VERSION = 3
 SCHEMA_VERSION_ROW_ID = 1
+LEGACY_TABLE_NAMES = {
+    "users",
+    "sessions",
+    "documents",
+    "chat_history",
+    "chat_sources",
+    "chat_turns",
+    "schema_version",
+    "episodic_memory",
+    "semantic_memory",
+    "session_summary",
+}
 
 INDEX_DEFINITIONS = (
     ("idx_chat_session", "chat_history", "CREATE INDEX idx_chat_session ON chat_history(user_id, session_id, created_at)"),
@@ -213,7 +225,10 @@ def _upgrade_legacy_schema(bind=engine) -> None:
                 "拒绝自动降级。"
             )
 
-    Base.metadata.create_all(bind)
+    Base.metadata.create_all(
+        bind,
+        tables=[Base.metadata.tables[name] for name in LEGACY_TABLE_NAMES],
+    )
     _ensure_chat_turn_lease_columns(bind)
     _ensure_chat_turn_foreign_keys(bind)
     _ensure_indexes(bind)
@@ -225,7 +240,7 @@ def _assert_legacy_schema_ready(bind=engine) -> None:
     """启动前验证当前版本所需的表、列、外键、索引和版本标记。"""
     inspector = inspect(bind)
     table_names = set(inspector.get_table_names())
-    missing_tables = sorted(set(Base.metadata.tables) - table_names)
+    missing_tables = sorted(LEGACY_TABLE_NAMES - table_names)
     if missing_tables:
         raise _upgrade_instruction(f"缺少表：{', '.join(missing_tables)}")
 
@@ -310,7 +325,19 @@ def upgrade_schema(bind=engine) -> None:
         # 防止残缺库被误标为最新版本。
         _upgrade_legacy_schema(bind)
         _assert_legacy_schema_ready(bind)
-        _run_alembic(bind, command.stamp, "0001_current_schema")
+        refreshed_tables = set(inspect(bind).get_table_names())
+        current_columns_present = (
+            "index_jobs" in refreshed_tables
+            and {"index_version", "indexed_version"}
+            <= {item["name"] for item in inspect(bind).get_columns("documents")}
+            and {"index_version", "indexed_version", "index_state"}
+            <= {item["name"] for item in inspect(bind).get_columns("semantic_memory")}
+        )
+        _run_alembic(
+            bind,
+            command.stamp,
+            "head" if current_columns_present else "0001_current_schema",
+        )
 
     _run_alembic(bind, command.upgrade, "head")
     assert_schema_ready(bind)
@@ -324,6 +351,10 @@ def downgrade_schema(bind=engine, revision: str = "-1") -> None:
 def assert_schema_ready(bind=engine) -> None:
     """验证业务结构完整且 Alembic revision 与代码 head 一致。"""
     _assert_legacy_schema_ready(bind)
+    table_names = set(inspect(bind).get_table_names())
+    missing_current_tables = sorted(set(Base.metadata.tables) - table_names)
+    if missing_current_tables:
+        raise _upgrade_instruction(f"缺少表：{', '.join(missing_current_tables)}")
     current = _current_alembic_revision(bind)
     head = _alembic_head()
     if current != head:

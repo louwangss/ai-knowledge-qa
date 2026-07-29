@@ -124,8 +124,8 @@ def test_upload_sanitizes_display_filename(db_session, tmp_path, monkeypatch):
     assert len(list(tmp_path.iterdir())) == 1
 
 
-def test_processing_failure_cleans_file_record_and_internal_error(db_session, tmp_path, monkeypatch):
-    """解析失败且向量清理成功时，不保留文件/记录，也不回显内部异常。"""
+def test_processing_failure_keeps_recoverable_record_without_leaking_error(db_session, tmp_path, monkeypatch):
+    """解析失败时保留权威记录并排队重试，且不回显内部异常。"""
     monkeypatch.setattr(routes_documents, "UPLOAD_DIR", str(tmp_path))
     monkeypatch.setattr(routes_documents, "MAX_UPLOAD_BYTES", 1024, raising=False)
     monkeypatch.setattr(
@@ -142,11 +142,13 @@ def test_processing_failure_cleans_file_record_and_internal_error(db_session, tm
             db=db_session,
         )
 
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 503
     assert "private" not in str(exc_info.value.detail).lower()
     assert "parse failed" not in str(exc_info.value.detail).lower()
-    assert list(tmp_path.iterdir()) == []
-    assert db_session.execute(select(Document)).scalars().all() == []
+    records = db_session.execute(select(Document)).scalars().all()
+    assert len(records) == 1
+    assert records[0].status == "failed"
+    assert len(list(tmp_path.iterdir())) == 1
 
 
 def test_duplicate_upload_leaves_no_temporary_file(db_session, tmp_path, monkeypatch):
@@ -214,7 +216,7 @@ def test_partial_vector_cleanup_failure_keeps_recoverable_failed_record(
         )
 
     records = db_session.execute(select(Document)).scalars().all()
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 503
     assert "partial vector" not in str(exc_info.value.detail).lower()
     assert len(records) == 1
     assert records[0].status == "failed"
@@ -224,8 +226,8 @@ def test_partial_vector_cleanup_failure_keeps_recoverable_failed_record(
     assert not any(path.name.endswith(".part") for path in paths)
 
 
-def test_chroma_delete_failure_preserves_database_and_source_file(db_session, tmp_path, monkeypatch):
-    """派生向量删除失败时，MySQL 权威记录和源文件必须保持不变。"""
+def test_chroma_delete_failure_queues_retry_and_preserves_source(db_session, tmp_path, monkeypatch):
+    """派生向量删除失败时隐藏记录、保留源文件并进入重试队列。"""
     source_path = tmp_path / "source.txt"
     source_path.write_text("source", encoding="utf-8")
     db_session.add(Document(
@@ -247,11 +249,10 @@ def test_chroma_delete_failure_preserves_database_and_source_file(db_session, tm
         lambda doc_id: (_ for _ in ()).throw(RuntimeError("chroma unavailable")),
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        routes_documents.delete_document("doc-1", user_id="u1", db=db_session)
+    response = routes_documents.delete_document("doc-1", user_id="u1", db=db_session)
 
-    assert exc_info.value.status_code == 503
-    assert db_session.get(Document, "doc-1") is not None
+    assert response == {"detail": "删除任务已入队，将在后台重试"}
+    assert db_session.get(Document, "doc-1").status == "deleting"
     assert source_path.exists()
 
 

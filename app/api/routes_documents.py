@@ -2,7 +2,6 @@
 import hashlib
 import logging
 import uuid
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
@@ -12,7 +11,8 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, require_app_user
 from app.models.schemas import DocumentResponse
 from config import MAX_UPLOAD_BYTES, UPLOAD_DIR
-from db.models import Document, User
+from db.models import Document, IndexJob, User
+from indexing.jobs import enqueue_index_job, run_index_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
@@ -49,6 +49,40 @@ def delete_documents_by_mysql_id(mysql_id: str):
     from rag.vector_store import delete_documents_by_mysql_id as delete
 
     return delete(mysql_id)
+
+
+def process_document_index_job(db: Session, job: IndexJob) -> None:
+    """执行已持久化的文档索引任务；任务版本过期时安全跳过。"""
+    doc = db.get(Document, job.entity_id)
+    if doc is None or doc.index_version != job.desired_version:
+        return
+
+    if job.operation == "delete":
+        delete_documents_by_mysql_id(doc.id)
+        Path(doc.file_path).unlink(missing_ok=True)
+        db.delete(doc)
+        return
+
+    if job.operation != "upsert":
+        raise ValueError(f"不支持的文档索引操作: {job.operation}")
+
+    doc.status = "indexing"
+    db.commit()
+    documents = load_document(doc.file_path)
+    chunks = split_text(documents)
+    add_documents_to_rag(
+        user_id=doc.user_id,
+        mysql_id=doc.id,
+        source=doc.filename,
+        chunks=chunks,
+        created_at=doc.created_at.isoformat() if doc.created_at else "",
+        index_version=job.desired_version,
+    )
+    doc = db.get(Document, job.entity_id)
+    if doc is not None and doc.index_version == job.desired_version:
+        doc.chunk_count = len(chunks)
+        doc.indexed_version = job.desired_version
+        doc.status = "ready"
 
 
 def _normalize_filename(filename: str | None) -> tuple[str, str]:
@@ -124,7 +158,7 @@ def upload_document(
         temp_path.unlink(missing_ok=True)
         raise
 
-    # 创建文档记录（status=processing）
+    # 权威记录与索引任务在同一事务提交，进程崩溃后仍可继续处理。
     doc = Document(
         id=str(uuid.uuid4()),
         user_id=user_id,
@@ -135,10 +169,13 @@ def upload_document(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
         content_hash=content_hash,
-        status="processing",
+        status="indexing",
+        index_version=1,
+        indexed_version=0,
     )
     db.add(doc)
     try:
+        job = enqueue_index_job(db, "document", doc.id, "upsert", doc.index_version)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -149,70 +186,12 @@ def upload_document(
         file_path.unlink(missing_ok=True)
         raise
 
-    # 处理文档：加载 → 切片 → 向量化
-    vector_write_attempted = False
-    try:
-        documents = load_document(str(file_path))
-        chunks = split_text(documents)
-        vector_write_attempted = True
-        add_documents_to_rag(
-            user_id=user_id,
-            mysql_id=doc.id,
-            source=display_filename,
-            chunks=chunks,
-            created_at=datetime.utcnow().isoformat(),
+    if not run_index_job(db, job.id):
+        raise HTTPException(
+            status_code=503,
+            detail="文档已保存，索引暂时失败并已进入后台重试队列",
         )
-        doc.chunk_count = len(chunks)
-        doc.status = "ready"
-        db.commit()
-    except Exception as exc:
-        logger.error(
-            "文档处理失败: document_id=%s, error_type=%s",
-            doc.id,
-            type(exc).__name__,
-        )
-        vectors_cleaned = not vector_write_attempted
-        if vector_write_attempted:
-            try:
-                delete_documents_by_mysql_id(doc.id)
-                vectors_cleaned = True
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "失败文档的部分向量清理失败: document_id=%s, error_type=%s",
-                    doc.id,
-                    type(cleanup_exc).__name__,
-                )
-
-        db.rollback()
-        persisted_doc = db.get(Document, doc.id)
-        if vectors_cleaned:
-            try:
-                if persisted_doc is not None:
-                    db.delete(persisted_doc)
-                    db.commit()
-                file_path.unlink(missing_ok=True)
-            except Exception as cleanup_exc:
-                db.rollback()
-                logger.warning(
-                    "失败文档的源记录清理失败: document_id=%s, error_type=%s",
-                    doc.id,
-                    type(cleanup_exc).__name__,
-                )
-        elif persisted_doc is not None:
-            try:
-                persisted_doc.status = "failed"
-                db.commit()
-            except Exception as cleanup_exc:
-                db.rollback()
-                logger.warning(
-                    "失败文档状态更新失败: document_id=%s, error_type=%s",
-                    doc.id,
-                    type(cleanup_exc).__name__,
-                )
-
-        raise HTTPException(status_code=500, detail="文档处理失败，请检查文件内容或稍后重试")
-
-    return doc
+    return db.get(Document, doc.id)
 
 
 @router.get("", response_model=list[DocumentResponse])
@@ -223,11 +202,11 @@ def list_documents(
     require_app_user(user_id)
     return db.query(Document).filter(
         Document.user_id == user_id,
-        Document.status == "ready",
+        Document.status != "deleting",
     ).order_by(Document.created_at.desc()).all()
 
 
-@router.delete("/{document_id}")
+@router.delete("/{document_id}", status_code=202)
 def delete_document(document_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
     require_app_user(user_id)
     doc = db.query(Document).filter(
@@ -237,21 +216,12 @@ def delete_document(document_id: str, user_id: str = Query(...), db: Session = D
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
 
-    source_path = Path(doc.file_path)
-
-    # 先删除派生向量；失败时保留 MySQL 权威记录和源文件，允许安全重试。
+    if doc.status == "deleting":
+        return {"detail": "删除任务已在队列中"}
+    doc.index_version += 1
+    doc.status = "deleting"
+    job = enqueue_index_job(db, "document", doc.id, "delete", doc.index_version)
     try:
-        delete_documents_by_mysql_id(doc.id)
-    except Exception as exc:
-        logger.warning(
-            "删除文档向量失败: document_id=%s, error_type=%s",
-            doc.id,
-            type(exc).__name__,
-        )
-        raise HTTPException(status_code=503, detail="文档删除暂时失败，请稍后重试")
-
-    try:
-        db.delete(doc)
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -262,14 +232,6 @@ def delete_document(document_id: str, user_id: str = Query(...), db: Session = D
         )
         raise HTTPException(status_code=503, detail="文档删除暂时失败，请稍后重试")
 
-    # 数据库与向量状态已一致；本地文件失败只会形成可人工清理的磁盘孤儿。
-    try:
-        source_path.unlink(missing_ok=True)
-    except OSError as exc:
-        logger.warning(
-            "文档记录已删除，但本地文件清理失败: document_id=%s, error_type=%s",
-            document_id,
-            type(exc).__name__,
-        )
-
-    return {"detail": "删除成功"}
+    if run_index_job(db, job.id):
+        return {"detail": "删除成功"}
+    return {"detail": "删除任务已入队，将在后台重试"}

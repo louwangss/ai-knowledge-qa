@@ -66,6 +66,17 @@ if CHAT_TURN_LEASE_SECONDS < CHAT_TURN_HEARTBEAT_SECONDS * 3:
         "CHAT_TURN_HEARTBEAT_SECONDS 的 3 倍"
     )
 
+# 索引任务默认值是单机部署的可调启发式起点；生产环境应依据任务耗时、失败率和积压监控调整。
+INDEX_JOB_POLL_SECONDS = _positive_int_env("INDEX_JOB_POLL_SECONDS", "5")
+INDEX_JOB_LEASE_SECONDS = _positive_int_env("INDEX_JOB_LEASE_SECONDS", "120")
+INDEX_JOB_BATCH_SIZE = _positive_int_env("INDEX_JOB_BATCH_SIZE", "20")
+INDEX_JOB_RETRY_BASE_SECONDS = _positive_int_env("INDEX_JOB_RETRY_BASE_SECONDS", "30")
+INDEX_JOB_RETRY_MAX_SECONDS = _positive_int_env("INDEX_JOB_RETRY_MAX_SECONDS", "1800")
+if INDEX_JOB_RETRY_MAX_SECONDS < INDEX_JOB_RETRY_BASE_SECONDS:
+    raise RuntimeError(
+        "环境变量 INDEX_JOB_RETRY_MAX_SECONDS 不能小于 INDEX_JOB_RETRY_BASE_SECONDS"
+    )
+
 # Tavily 可选（不用 web_search 时不需要）
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
