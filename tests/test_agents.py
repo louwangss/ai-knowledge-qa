@@ -2,6 +2,7 @@
 import logging
 
 import pytest
+from types import SimpleNamespace
 
 from agents.state import ResearchState, RetrievedDoc, RetrievedNote
 from agents.graph import build_graph
@@ -95,6 +96,42 @@ def _collect_edges(graph):
                     edges.add((src, d))
 
     return edges
+
+
+def test_decomposer_accepts_validated_json_object(monkeypatch):
+    from agents import decomposer
+
+    class FakeLlm:
+        def bind(self, **kwargs):
+            assert kwargs["response_format"] == {"type": "json_object"}
+            return self
+
+        def invoke(self, prompt):
+            return SimpleNamespace(content='{"sub_questions":["问题一是什么","问题二如何做","问题三有何风险"]}')
+
+    monkeypatch.setattr(decomposer, "get_llm", lambda **kwargs: FakeLlm())
+
+    result = decomposer.agent_a_decompose({"original_question": "原始问题"})
+
+    assert result["sub_questions"] == ["问题一是什么", "问题二如何做", "问题三有何风险"]
+
+
+@pytest.mark.parametrize("content", ["not json", '{"sub_questions":[1]}', ""])
+def test_decomposer_invalid_output_falls_back_to_original_question(monkeypatch, content):
+    from agents import decomposer
+
+    class FakeLlm:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, prompt):
+            return SimpleNamespace(content=content)
+
+    monkeypatch.setattr(decomposer, "get_llm", lambda **kwargs: FakeLlm())
+
+    assert decomposer.agent_a_decompose({"original_question": "原始问题"}) == {
+        "sub_questions": ["原始问题"]
+    }
 
 
 def test_summarizer_failure_propagates_sanitized_error(monkeypatch, caplog):

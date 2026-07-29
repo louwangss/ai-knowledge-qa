@@ -1,50 +1,55 @@
-"""Agent A：拆解问题为 3~5 个子问题"""
+"""Agent A：用受校验的 JSON 对象拆解问题。"""
+
+import logging
+
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
+
 from agents.state import ResearchState
 from config import CHAT_STAGE_TIMEOUT_SECONDS
 from rag.llm import get_llm
 
-PROMPT = """你是一个问题分析专家。请将用户的问题拆解为 3~5 个子问题或搜索关键词，用于后续检索。
+
+logger = logging.getLogger(__name__)
+
+PROMPT = """你是一个问题分析专家。请将用户问题拆解为 3~5 个用于知识库检索的子问题。
 
 要求：
-1. 每个子问题 10~20 字，简洁明确
-2. 覆盖问题的不同方面
-3. 输出 JSON 数组格式
-
-示例：
-用户问题：什么是RAG以及它如何减少大模型幻觉？
-输出：["RAG的定义和核心原理", "RAG的工作流程", "大模型幻觉问题的成因", "RAG如何缓解幻觉问题"]
+1. 覆盖问题的不同方面，不重复
+2. 每项是非空字符串
+3. 只能输出一个 JSON 对象，格式为 {{"sub_questions":["问题1","问题2","问题3"]}}
 
 用户问题：{question}
+"""
 
-请直接输出 JSON 数组，不要加其他说明："""
+
+class Decomposition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sub_questions: list[StrictStr] = Field(min_length=3, max_length=5)
+
+    @field_validator("sub_questions")
+    @classmethod
+    def normalize_questions(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("子问题不能为空")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("子问题不能重复")
+        return normalized
 
 
 def agent_a_decompose(state: ResearchState) -> dict:
-    """拆解问题"""
+    """解析结构化拆题结果；任一调用或校验失败均确定性退回原问题。"""
     question = state["original_question"]
-    llm = get_llm(
-        temperature=0.3,
-        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
-        max_retries=0,
-    )
-
-    resp = llm.invoke(PROMPT.format(question=question))
-
-    # 解析 JSON 数组
-    import json
-    import re
-
-    text = resp.content.strip()
-    # 尝试提取 JSON 数组
-    match = re.search(r'\[.*?\]', text, re.DOTALL)
-    if match:
-        sub_questions = json.loads(match.group())
-    else:
-        # fallback：按换行分割
-        lines = [line.strip().strip("0123456789.、- ") for line in text.split("\n") if line.strip()]
-        sub_questions = lines[:5]
-
-    if not sub_questions:
-        sub_questions = [question]
-
-    return {"sub_questions": sub_questions}
+    try:
+        llm = get_llm(
+            temperature=0.3,
+            timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+            max_retries=0,
+        ).bind(response_format={"type": "json_object"})
+        response = llm.invoke(PROMPT.format(question=question))
+        parsed = Decomposition.model_validate_json(response.content)
+        return {"sub_questions": parsed.sub_questions}
+    except Exception as exc:
+        logger.warning("Agent A 结构化拆题失败，回退原问题: error_type=%s", type(exc).__name__)
+        return {"sub_questions": [question]}

@@ -65,6 +65,9 @@ def test_retrieve_context_uses_distinct_worker_sessions_and_closes_them():
         )
         stack.enter_context(patch.object(retrieve, "get_recent_events", side_effect=fake_recent_events))
         stack.enter_context(patch.object(retrieve, "load_conversation_memory", side_effect=fake_conversation))
+        stack.enter_context(
+            patch.object(retrieve, "filter_authoritative_results", side_effect=lambda items, **kwargs: items)
+        )
 
         context = asyncio.run(
             retrieve.retrieve_context(
@@ -128,6 +131,9 @@ def test_deep_mode_keeps_contract_and_skips_document_search():
         stack.enter_context(patch.object(retrieve, "get_rag_vector_store", return_value=document_store))
         stack.enter_context(patch.object(retrieve, "get_semantic_vector_store", return_value=note_store))
         stack.enter_context(patch.object(retrieve, "get_recent_events", return_value=[]))
+        stack.enter_context(
+            patch.object(retrieve, "filter_authoritative_results", side_effect=lambda items, **kwargs: items)
+        )
         stack.enter_context(
             patch.object(
                 retrieve,

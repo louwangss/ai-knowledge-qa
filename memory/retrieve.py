@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from db.database import SessionLocal
 from memory.conversation import load_conversation_memory
 from memory.episodic import get_recent_events
+from rag.retrieval_policy import filter_authoritative_results
 
 if TYPE_CHECKING:
     from langchain_chroma import Chroma
@@ -42,7 +43,7 @@ def _sync_chroma_search(
         k=top_k,
         filter={"$and": [{"user_id": user_id}, {"type": doc_type}]},
     )
-    return [
+    candidates = [
         {
             "content": doc.page_content,
             "metadata": doc.metadata,
@@ -50,6 +51,12 @@ def _sync_chroma_search(
         }
         for doc, score in results
     ]
+    return filter_authoritative_results(
+        candidates,
+        user_id=user_id,
+        doc_type=doc_type,
+        session_factory=SessionLocal,
+    )
 
 
 def _filter_by_relevance(docs: list[dict], threshold: float) -> list[dict]:

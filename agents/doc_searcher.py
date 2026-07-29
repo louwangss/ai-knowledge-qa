@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from agents.state import ResearchState, RetrievedDoc
 from rag.vector_store import get_rag_vector_store
+from rag.retrieval_policy import search_indexed_content
 
 logger = logging.getLogger(__name__)
 
@@ -11,18 +12,20 @@ logger = logging.getLogger(__name__)
 def _sync_search(question: str, user_id: str, top_k: int = 3) -> list[RetrievedDoc]:
     """同步检索单个子问题"""
     vs = get_rag_vector_store()
-    results = vs.similarity_search_with_relevance_scores(
-        question,
-        k=top_k,
-        filter={"$and": [{"user_id": user_id}, {"type": "document"}]},
+    results = search_indexed_content(
+        vs,
+        user_id=user_id,
+        question=question,
+        top_k=top_k,
+        doc_type="document",
     )
     docs: list[RetrievedDoc] = []
-    for doc, score in results:
+    for result in results:
         docs.append(RetrievedDoc(
-            content=doc.page_content,
-            source=doc.metadata.get("source", "unknown"),
+            content=result["content"],
+            source=result["metadata"].get("source", "unknown"),
             sub_question=question,
-            score=score,
+            score=result["score"],
         ))
     return docs
 
