@@ -108,6 +108,7 @@ cp .env.example .env
 | `API_HOST` | 否 | FastAPI 监听地址，默认 `127.0.0.1` |
 | `MAX_UPLOAD_BYTES` | 否 | 默认 25 MiB，是当前单机演示的可调整启发式值 |
 | `CHAT_TURN_LEASE_SECONDS` / `CHAT_TURN_HEARTBEAT_SECONDS` | 否 | 默认 90 / 30 秒；租约至少覆盖 3 个心跳周期，用于多 worker 的过期接管与 fencing |
+| `CHAT_STAGE_TIMEOUT_SECONDS` | 否 | 默认 30 秒；检索时是阶段总超时，direct/Agent/deep 流式生成时是相邻对外进度事件的空闲超时 |
 | `SUMMARY_LLM_TIMEOUT_SECONDS` / `SUMMARY_LLM_MAX_RETRIES` | 否 | 内部摘要默认 30 秒超时、0 次自动重试；不改变普通问答模型调用参数 |
 
 可用以下命令生成 token：
@@ -222,6 +223,7 @@ python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 - Web 会话只解决本机单用户演示的浏览器凭证隔离，不是完整多租户认证；公网部署前应增加 HTTPS、正式身份认证、限流和网络访问控制。
 - Redis 仍用于 React 的 HttpOnly 登录会话和登录限流；Redis 不可用时 Web 登录会返回 503，但 MySQL 中的会话、消息和摘要不会丢失，服务端 Bearer 客户端也不依赖 Redis 读取对话事实。
 - ChatTurn 使用数据库时钟、每次执行独立 owner、90 秒租约与 30 秒心跳；多 worker 启动时只回收无租约或已过期的 turn，旧 worker 受 fencing 约束不能覆盖新 owner。90/30 是结合当前 30 秒流式空闲超时设定的启发式默认值，并非容量结论；生产部署应根据事件循环阻塞、数据库延迟和故障恢复指标重新校准。
+- `CHAT_STAGE_TIMEOUT_SECONDS=30` 延续项目原有 direct 流式空闲边界，并统一用于检索、Agent 与 deep 阶段；这是可调启发式默认值，不是上游 SLA。2026-07-29 核对的 Python 官方文档说明超时会取消当前等待，但线程中的同步工作不能被强制终止；DeepSeek 官方文档也只承诺等待期间发送 keep-alive，不提供应用层推荐时限。参考 [Python asyncio timeouts](https://docs.python.org/3/library/asyncio-task.html#timeouts) 与 [DeepSeek FAQ](https://api-docs.deepseek.com/faq)。
 - FastAPI 与 Vite 默认只监听 `127.0.0.1`；不要直接把开发服务端口暴露到公网。
 - Chroma 的用户隔离依赖 metadata filter，而不是物理分库；当前后端再通过固定用户 ID 限制访问。
 - 系统未实现恶意文件扫描、复杂内容沙箱、全链路指标后端、告警、自动备份恢复演练或生产级容量验证。

@@ -24,7 +24,11 @@ from app.observability import get_or_create_request_id, log_event
 from app.stream_utils import stream_with_idle_timeout
 from db.models import ChatHistory, ChatSource, ChatTurn, Session as SessionModel, User
 from db.database import SessionLocal
-from config import CHAT_TURN_HEARTBEAT_SECONDS, CHAT_TURN_LEASE_SECONDS
+from config import (
+    CHAT_STAGE_TIMEOUT_SECONDS,
+    CHAT_TURN_HEARTBEAT_SECONDS,
+    CHAT_TURN_LEASE_SECONDS,
+)
 from memory.conversation import maybe_compress_conversation
 from memory.episodic import record_event
 from memory.retrieve import retrieve_context
@@ -354,10 +358,26 @@ def _streaming_response(
 
 
 def _get_error_message(e: Exception) -> str:
-    error_str = str(e).lower()
-    if "timeout" in error_str:
+    chain = []
+    current: BaseException | None = e
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+
+    if any(
+        isinstance(item, TimeoutError)
+        or "timeout" in type(item).__name__.lower()
+        or "timeout" in str(item).lower()
+        for item in chain
+    ):
         return "请求超时，请重新提问"
-    if "connection" in error_str or "auth" in error_str or "401" in error_str:
+    if any(
+        marker in str(item).lower()
+        for item in chain
+        for marker in ("connection", "auth", "401")
+    ):
         return "AI 服务暂时不可用，请稍后重试"
     return "回答生成中断，请重新提问"
 
@@ -486,11 +506,14 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
             turn_event("turn_started")
             # 生成前不写 chat_history；上下文由 MySQL 权威历史读取。
             retrieval_started_at = time.perf_counter()
-            context = await retrieve_context(
-                user_id=payload.user_id,
-                session_id=payload.session_id,
-                question=payload.message,
-                mode=payload.mode,
+            context = await asyncio.wait_for(
+                retrieve_context(
+                    user_id=payload.user_id,
+                    session_id=payload.session_id,
+                    question=payload.message,
+                    mode=payload.mode,
+                ),
+                timeout=CHAT_STAGE_TIMEOUT_SECONDS,
             )
             _raise_if_lease_lost(lease_lost)
             turn_event(
@@ -536,6 +559,8 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
 
             all_sources = _normalize_sources(all_sources)
             _raise_if_lease_lost(lease_lost)
+            if not full_answer.strip():
+                raise RuntimeError("LLM 未返回有效回答")
 
             # 完整一轮及 turn 完成状态只提交一次，不留下半轮事实。
             stage = "persist_turn"
@@ -777,7 +802,10 @@ def _log_derived_failure(
 
 async def _stream_normal(payload: ChatRequest, context: dict):
     """normal 模式：流式输出 LLM token"""
-    llm = get_llm(temperature=0.3)
+    llm = get_llm(
+        temperature=0.3,
+        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+    )
 
     prompt = NORMAL_PROMPT.format(
         current_date=datetime.now().strftime("%Y-%m-%d"),
@@ -792,18 +820,29 @@ async def _stream_normal(payload: ChatRequest, context: dict):
 
     # 如果有 Tavily key，用 Agent 模式（支持工具调用）
     if TAVILY_API_KEY:
+        agent_answer_started = False
         try:
-            async for event in _agent_stream(prompt):
+            async for event in stream_with_idle_timeout(
+                _agent_stream(prompt),
+                timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+            ):
+                if event.get("type") == "token" and event.get("content"):
+                    agent_answer_started = True
                 yield event
             return
         except Exception as e:
+            if agent_answer_started:
+                raise
             logger.warning(
                 "Agent 模式失败，fallback 到普通 LLM: error_type=%s",
                 type(e).__name__,
             )
 
     # 普通 LLM 流式（带 idle timeout 保护）
-    async for chunk in stream_with_idle_timeout(llm.astream(prompt), timeout=30.0):
+    async for chunk in stream_with_idle_timeout(
+        llm.astream(prompt),
+        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+    ):
         if chunk.content:
             yield {"type": "token", "content": chunk.content}
 
@@ -818,7 +857,10 @@ async def _agent_stream(prompt: str):
     """
     from langchain.agents import create_agent
 
-    llm = get_llm(temperature=0.3)
+    llm = get_llm(
+        temperature=0.3,
+        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+    )
     tools = [web_search, calculator]
     today = datetime.now().strftime("%Y-%m-%d")
     system_prompt = (
@@ -888,7 +930,10 @@ async def _stream_deep(payload: ChatRequest, context: dict):
     # 初始 status
     yield {"type": "status", "content": "正在拆解问题..."}
 
-    async for mode_name, data in graph.astream(initial_state, stream_mode=["updates", "custom"]):
+    async for mode_name, data in stream_with_idle_timeout(
+        graph.astream(initial_state, stream_mode=["updates", "custom"]),
+        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+    ):
         if mode_name == "updates":
             for node_name, update in data.items():
                 if "sub_questions" in update:

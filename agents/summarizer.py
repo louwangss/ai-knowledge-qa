@@ -2,6 +2,7 @@
 import logging
 
 from agents.state import ResearchState
+from config import CHAT_STAGE_TIMEOUT_SECONDS
 from rag.llm import get_llm
 
 logger = logging.getLogger(__name__)
@@ -122,7 +123,11 @@ def agent_c_summarize(state: ResearchState) -> dict:
     from langgraph.config import get_stream_writer
 
     writer = get_stream_writer()
-    llm = get_llm(temperature=0.3)
+    llm = get_llm(
+        temperature=0.3,
+        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
     prompt = _build_prompt(state)
 
     full_answer = ""
@@ -134,6 +139,6 @@ def agent_c_summarize(state: ResearchState) -> dict:
                 writer({"type": "token", "content": token})
     except Exception as e:
         logger.error("Agent C LLM 调用失败: error_type=%s", type(e).__name__)
-        full_answer = "抱歉，生成回答时发生错误，请稍后重试"
+        raise RuntimeError("Agent C LLM 调用失败") from e
 
     return {"final_answer": full_answer}

@@ -164,6 +164,11 @@ async def _stream_failure(payload, context):
     raise RuntimeError("generation failed")
 
 
+async def _stream_empty(payload, context):
+    if False:
+        yield
+
+
 async def _stream_cancelled(payload, context):
     if False:
         yield
@@ -188,6 +193,7 @@ async def _collect_chat(
     mode="normal",
     client_turn_id=None,
     compression_side_effect=None,
+    retrieve_factory=_retrieve_context,
 ):
     payload = ChatRequest(
         user_id="u1",
@@ -198,7 +204,7 @@ async def _collect_chat(
     )
 
     with ExitStack() as stack:
-        stack.enter_context(patch.object(routes_chat, "retrieve_context", side_effect=_retrieve_context))
+        stack.enter_context(patch.object(routes_chat, "retrieve_context", side_effect=retrieve_factory))
         stream_name = "_stream_deep" if mode == "deep" else "_stream_normal"
         stack.enter_context(patch.object(routes_chat, stream_name, side_effect=stream_factory))
         stack.enter_context(patch.object(
@@ -1154,6 +1160,60 @@ def test_generation_failure_removes_pending_turn_and_does_not_leave_title(db_ses
     session = db_session.get(SessionModel, "s1")
     assert session.title is None
     assert "event: error" in stream
+
+
+def test_empty_answer_is_failed_and_never_persisted(db_session):
+    """模型无异常但没有正文时不能留下空 assistant 或 completed turn。"""
+    turn_id = uuid.uuid4()
+
+    stream = asyncio.run(_collect_chat(
+        db_session,
+        FakeRedis(),
+        stream_factory=_stream_empty,
+        client_turn_id=turn_id,
+    ))
+
+    rows = db_session.execute(
+        select(ChatHistory).order_by(ChatHistory.id.asc())
+    ).scalars().all()
+    turn = db_session.get(ChatTurn, str(turn_id))
+
+    assert [(row.role, row.content) for row in rows] == [
+        ("user", "历史问题"),
+        ("assistant", "历史回答"),
+    ]
+    assert turn.status == "failed"
+    assert "event: error" in stream
+    assert "event: done" not in stream
+
+
+def test_retrieval_timeout_marks_turn_failed_without_half_history(db_session, monkeypatch):
+    """检索阶段超过边界时停止续租，且不写入当前问答事实。"""
+    turn_id = uuid.uuid4()
+
+    async def hanging_retrieval(**kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(routes_chat, "CHAT_STAGE_TIMEOUT_SECONDS", 0.01)
+    stream = asyncio.run(_collect_chat(
+        db_session,
+        FakeRedis(),
+        client_turn_id=turn_id,
+        retrieve_factory=hanging_retrieval,
+    ))
+
+    rows = db_session.execute(
+        select(ChatHistory).order_by(ChatHistory.id.asc())
+    ).scalars().all()
+    turn = db_session.get(ChatTurn, str(turn_id))
+
+    assert [(row.role, row.content) for row in rows] == [
+        ("user", "历史问题"),
+        ("assistant", "历史回答"),
+    ]
+    assert turn.status == "failed"
+    assert "请求超时，请重新提问" in stream
+    assert "event: done" not in stream
 
 
 def test_chat_turn_logs_stage_timings_without_user_content(db_session, caplog):

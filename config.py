@@ -58,6 +58,8 @@ WEB_LOGIN_WINDOW_SECONDS = _positive_int_env("APP_WEB_LOGIN_WINDOW_SECONDS", "30
 # ChatTurn 租约是可调的启发式边界：默认覆盖 3 个心跳周期，避免短暂调度抖动误判。
 CHAT_TURN_LEASE_SECONDS = _positive_int_env("CHAT_TURN_LEASE_SECONDS", "90")
 CHAT_TURN_HEARTBEAT_SECONDS = _positive_int_env("CHAT_TURN_HEARTBEAT_SECONDS", "30")
+# 保留原普通问答 30 秒空闲边界，并统一约束检索完成时间与各流式阶段的无进度等待。
+CHAT_STAGE_TIMEOUT_SECONDS = _positive_int_env("CHAT_STAGE_TIMEOUT_SECONDS", "30")
 if CHAT_TURN_LEASE_SECONDS < CHAT_TURN_HEARTBEAT_SECONDS * 3:
     raise RuntimeError(
         "环境变量 CHAT_TURN_LEASE_SECONDS 必须至少为 "

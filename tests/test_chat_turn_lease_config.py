@@ -15,6 +15,7 @@ def _import_config_with(**overrides):
     env = os.environ.copy()
     env.pop("CHAT_TURN_LEASE_SECONDS", None)
     env.pop("CHAT_TURN_HEARTBEAT_SECONDS", None)
+    env.pop("CHAT_STAGE_TIMEOUT_SECONDS", None)
     env.update(overrides)
     env["PYTHONUTF8"] = "1"
     return subprocess.run(
@@ -24,7 +25,8 @@ def _import_config_with(**overrides):
             (
                 "import config; "
                 "print(config.CHAT_TURN_LEASE_SECONDS, "
-                "config.CHAT_TURN_HEARTBEAT_SECONDS)"
+                "config.CHAT_TURN_HEARTBEAT_SECONDS, "
+                "config.CHAT_STAGE_TIMEOUT_SECONDS)"
             ),
         ],
         cwd=PROJECT_ROOT,
@@ -40,7 +42,7 @@ def test_chat_turn_lease_config_has_bounded_defaults():
     completed = _import_config_with()
 
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == "90 30"
+    assert completed.stdout.strip() == "90 30 30"
 
 
 @pytest.mark.parametrize(
@@ -49,6 +51,10 @@ def test_chat_turn_lease_config_has_bounded_defaults():
         (
             {"CHAT_TURN_HEARTBEAT_SECONDS": "0"},
             "环境变量 CHAT_TURN_HEARTBEAT_SECONDS 必须为正整数",
+        ),
+        (
+            {"CHAT_STAGE_TIMEOUT_SECONDS": "0"},
+            "环境变量 CHAT_STAGE_TIMEOUT_SECONDS 必须为正整数",
         ),
         (
             {

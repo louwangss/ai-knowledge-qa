@@ -1,5 +1,6 @@
 """Agent A：拆解问题为 3~5 个子问题"""
 from agents.state import ResearchState
+from config import CHAT_STAGE_TIMEOUT_SECONDS
 from rag.llm import get_llm
 
 PROMPT = """你是一个问题分析专家。请将用户的问题拆解为 3~5 个子问题或搜索关键词，用于后续检索。
@@ -21,7 +22,11 @@ PROMPT = """你是一个问题分析专家。请将用户的问题拆解为 3~5 
 def agent_a_decompose(state: ResearchState) -> dict:
     """拆解问题"""
     question = state["original_question"]
-    llm = get_llm(temperature=0.3)
+    llm = get_llm(
+        temperature=0.3,
+        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
     resp = llm.invoke(PROMPT.format(question=question))
 

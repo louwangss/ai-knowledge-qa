@@ -1,6 +1,8 @@
 """Agent 工作流测试：graph 结构 + state 定义 + 子问题解析"""
 import logging
 
+import pytest
+
 from agents.state import ResearchState, RetrievedDoc, RetrievedNote
 from agents.graph import build_graph
 
@@ -95,8 +97,8 @@ def _collect_edges(graph):
     return edges
 
 
-def test_summarizer_failure_does_not_return_or_log_upstream_detail(monkeypatch, caplog):
-    """Agent C 失败时只返回模糊消息，不泄露上游异常正文。"""
+def test_summarizer_failure_propagates_sanitized_error(monkeypatch, caplog):
+    """Agent C 失败时向图传播模糊异常，不把半截回答当作成功结果。"""
     import langgraph.config
     from agents import summarizer
 
@@ -110,14 +112,14 @@ def test_summarizer_failure_does_not_return_or_log_upstream_detail(monkeypatch, 
     monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: lambda event: None)
     caplog.set_level(logging.ERROR)
 
-    result = summarizer.agent_c_summarize({
-        "original_question": "公开测试问题",
-        "retrieved_docs": [],
-        "notes": [],
-        "episodic_memory": [],
-        "short_term_memory": "",
-    })
+    with pytest.raises(RuntimeError, match="Agent C LLM 调用失败") as exc_info:
+        summarizer.agent_c_summarize({
+            "original_question": "公开测试问题",
+            "retrieved_docs": [],
+            "notes": [],
+            "episodic_memory": [],
+            "short_term_memory": "",
+        })
 
-    assert secret_detail not in result["final_answer"]
+    assert secret_detail not in str(exc_info.value)
     assert secret_detail not in caplog.text
-    assert result["final_answer"] == "抱歉，生成回答时发生错误，请稍后重试"
