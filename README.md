@@ -1,256 +1,341 @@
 # AI 知识库问答系统
 
-一个面向个人知识管理的 RAG + 多 Agent 问答项目。系统支持上传文档、普通流式问答和深度研究，并围绕数据一致性、单用户安全边界、失败恢复、低敏感可观测性和可复现实验补齐了工程化证据。
+一个面向个人知识管理的 RAG 问答项目。用户可以上传文档、维护笔记，并通过普通问答或多 Agent 深度研究获得带来源的流式回答。
 
-> 项目定位：本地或可信内网中的单用户演示系统，不是完整多租户 SaaS，也不应未经额外保护直接暴露到公网。
+项目当前定位为本地或可信内网中的单用户系统，重点处理了流式问答一致性、索引失败恢复、数据库迁移、资源归属校验和低敏感可观测性。它不是完整的多租户 SaaS，不应未经额外保护直接暴露到公网。
 
-## 项目亮点
+## 功能概览
 
-- **双模式问答**：normal 模式并行检索四类上下文；deep 模式通过 LangGraph 完成拆题、并行检索和结构化整合。
-- **三层记忆**：MySQL 持久化会话历史/摘要与情景记忆，MySQL + Chroma 管理语义记忆；Redis 不再承载对话事实。
-- **一致性恢复**：客户端 turn ID + MySQL 状态机支持失败重试和完成结果重放；user/assistant/来源一次事务提交，不会留下半轮消息。
-- **安全边界**：业务 API 使用 Bearer token，后端固定单一 `APP_USER_ID`；上传有流式大小限制，文档删除失败保留可重试的权威记录。
-- **可观测性**：request/turn ID 串联检索、首 token、完成和失败阶段；日志只记录 ID、计数、耗时、模式与错误类型。
-- **可验证交付**：Python 与 React 自动化测试、真实本地 MySQL/Redis 联调、无密钥 GitHub Actions 和公开离线评测基线。
+- **文档知识库**：支持 PDF、DOCX、TXT、Markdown、HTML，按内容哈希去重并通过持久化任务维护 Chroma 索引。
+- **语义笔记**：支持笔记 CRUD、版本冲突检测和向量索引同步。
+- **普通问答**：并行检索文档、笔记、情景记忆和会话上下文，使用 SSE 增量返回回答与来源。
+- **深度研究**：通过 LangGraph 完成结构化拆题、并行检索和答案整合。
+- **可选联网搜索**：仅把当前公开问题交给隔离规划器；最终回答模型不持有搜索工具权限。
+- **持久化会话**：MySQL 保存完整消息、摘要、来源和问答执行状态，刷新页面或重启服务后可以恢复。
+- **失败恢复**：文档和笔记索引由 MySQL 持久化任务驱动，支持租约、幂等执行、指数退避和失败重试。
+- **本地 Web 工作区**：React + TypeScript 提供问答、会话、文档和笔记管理界面。
 
-## 架构
+## 系统架构
 
 ```mermaid
 flowchart LR
-    U["用户"] --> W["React 问答/笔记/文档工作区 :5173"]
-    W -->|"HttpOnly 会话 + REST/SSE"| A["FastAPI :8000"]
+    U["用户"] --> W["React Web :5173"]
+    W -->|"HttpOnly 会话 / REST / SSE"| A["FastAPI :8000"]
 
     A --> M{"问答模式"}
-    M -->|"normal"| R["并行上下文检索"]
-    M -->|"deep"| D["Agent A：拆题"]
-    D --> E["Agent B：并行检索"]
-    E --> S["Agent C：整合"]
+    M -->|"normal"| R["统一上下文检索"]
+    M -->|"deep"| D["拆题 Agent"]
+    D --> P["并行检索 Agent"]
+    P --> S["整合 Agent"]
 
-    R --> C[("Chroma 文档/笔记索引")]
-    E --> C
-    R --> MY[("MySQL 历史、摘要与权威业务记录")]
-    A --> RE[("Redis Web 登录会话与限流")]
+    R --> V[("Chroma 派生向量索引")]
+    P --> V
+    R --> DB[("MySQL 权威数据与任务状态")]
+    A --> DB
+    A --> RD[("Redis Web 会话与登录限流")]
     R --> L["DeepSeek 兼容 LLM"]
     S --> L
-    A -. "仅公开问题规划，可选" .-> T["Tavily 结构化搜索"]
+    A -. "可选" .-> T["Tavily 公开搜索"]
 ```
 
-### Chat 状态流
+### 数据职责
+
+| 组件 | 职责 |
+| --- | --- |
+| MySQL | 用户、会话、完整聊天记录、摘要、来源、文档、笔记、情景记忆、问答状态和索引任务的权威数据源 |
+| ChromaDB | 文档与笔记的可重建向量索引；检索结果必须通过 MySQL 状态和版本校验 |
+| Redis | React Web 的 HttpOnly 登录会话和登录限流；不保存权威对话内容 |
+| 本地文件系统 | 保存上传原文件；文件状态由 MySQL 文档记录管理 |
+
+### Chat 执行流程
 
 ```text
-Bearer / HttpOnly 会话认证与资源归属校验
-  -> 预占 client_turn_id，并取得带过期时间的执行租约
-  -> 从 MySQL 摘要与历史读取此前已完成的对话上下文
-  -> 并行检索文档、笔记与情景记忆
-  -> normal/deep 流式生成，独立短事务定期续租
-  -> 单事务持久化 user + assistant + sources + completed turn
-  -> best-effort 更新 MySQL 摘要与情景事件
-  -> sources + done
+认证和资源归属校验
+  -> 预占 client_turn_id 并获取有期限的执行租约
+  -> 从 MySQL 读取已完成历史和摘要
+  -> 并行检索上下文
+  -> normal 或 deep 流式生成，并定期续租
+  -> 单事务写入 user、assistant、sources 和 completed turn
+  -> best-effort 更新摘要与情景记忆
+  -> 返回 sources 和 done 事件
 ```
 
-生成未完成时只把 reservation 标为 failed，不写聊天事实；进程异常退出后，其他 worker 只能接管已过期租约，并且旧 owner 无权再提交结果。assistant 已持久化后，即使浏览器没收到 `done`，同一 turn ID 重试也会直接重放结果。React 重新打开会话时按 session ID 从 MySQL 加载历史，因此第二天启动或 Web 登录状态过期后，重新登录仍可继续同一会话。
+`client_turn_id` 是一次问答的幂等键。连接中断后，客户端可以使用同一 ID 查询状态或重试；已经完成的回答会直接重放。租约过期后其他 worker 可以接管任务，旧 owner 不能覆盖新执行结果。
 
-会话摘要是可重建的派生状态：后台摘要调用默认 30 秒超时、0 次 SDK 重试；失败时不会截断原始消息或推进压缩游标，下一次达到压缩条件时可继续尝试。
+### 索引任务流程
 
-### 文档生命周期
+文档或笔记变更时，业务记录与 `index_jobs` 任务在同一数据库事务中提交。任务使用稳定向量 ID 和索引版本执行 upsert/delete；进程退出、Chroma 暂时不可用或 embedding 失败时，后台补偿循环会继续处理未完成任务。
 
-上传按块读取并增量计算 SHA-256，超过 `MAX_UPLOAD_BYTES` 时在解析和 embedding 前返回 413。临时文件通过原子改名进入正式目录；MySQL 会在同一事务保存权威记录和持久化索引任务。解析、向量化或删除失败时，任务按带抖动的指数退避重试；失败记录在文档列表中可见，删除中的记录立即从列表和检索中隐藏。Chroma 使用稳定向量 ID 与索引版本，检索结果还会回查 MySQL，只接受当前 `ready` 版本。
+文档状态包括 `indexing`、`ready`、`failed` 和 `deleting`。只有与 MySQL 当前版本一致且状态为 `ready` 的文档可以进入检索；重复上传失败文档会触发手动重试。
 
 ## 技术栈
 
 | 领域 | 技术 |
 | --- | --- |
-| API / UI | FastAPI、SSE、React、TypeScript、Vite、httpx |
+| 后端 | Python 3.11、FastAPI、SQLAlchemy、SSE |
+| 前端 | React 19、TypeScript、Vite |
 | LLM / Agent | DeepSeek 兼容 API、LangChain、LangGraph |
-| RAG | ChromaDB、`BAAI/bge-small-zh-v1.5`、PyMuPDF、docx2txt |
-| 数据 | MySQL、Redis、SQLAlchemy |
-| 工程质量 | pytest、GitHub Actions、结构化事件日志、离线评测 CLI |
+| RAG | ChromaDB、`BAAI/bge-small-zh-v1.5`、sentence-transformers |
+| 文档解析 | PyMuPDF、docx2txt、标准库 HTMLParser |
+| 数据设施 | MySQL 8、Redis、Alembic |
+| 测试与 CI | pytest、Vitest、GitHub Actions、MySQL 8.4 CI service |
 
 ## 快速开始
 
 ### 1. 环境要求
 
 - Python 3.11+
-- Node.js 22+（独立 Web 工作区）
+- Node.js 22+
 - MySQL 8.x
 - Redis 6.x+
 
-```bash
+### 2. 安装依赖
+
+```powershell
 git clone <你的仓库地址>
 cd ai-knowledge-qa
+
 python -m venv venv
-
-# Windows PowerShell
 .\venv\Scripts\Activate.ps1
-# Linux/macOS
-# source venv/bin/activate
-
 python -m pip install -r requirements.txt
-cd web && npm install && cd ..
+
+cd web
+npm install
+cd ..
 ```
 
-### 2. 配置
+Linux/macOS 使用 `source venv/bin/activate` 激活虚拟环境。
 
-复制 `.env.example` 为 `.env`，不要提交真实配置：
+### 3. 配置环境变量
 
-```bash
-cp .env.example .env
+复制 `.env.example` 为 `.env`，然后填写真实配置。不要提交 `.env`。
+
+```powershell
+Copy-Item .env.example .env
 ```
 
-| 变量 | 必填 | 用途 |
-| --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 是 | LLM API 凭据 |
-| `LLM_MODEL` / `LLM_BASE_URL` | 否 | 默认使用 `deepseek-v4-flash` 与 DeepSeek 兼容 API；可显式覆盖为其他兼容模型和地址 |
-| `MYSQL_*` | 是 | MySQL 连接配置 |
-| `APP_ACCESS_TOKEN` | 是 | 服务端 API 的 Bearer token，也可在本机手动换取 Web 会话；应使用足够长的随机值 |
-| `APP_USER_ID` | 是 | 服务端允许访问的固定单用户 ID |
-| `REDIS_*` | 否 | Redis 连接配置，密码可留空；当前用于 Web 登录会话、登录限流及定向清理升级前遗留 key，不保存权威对话记忆 |
-| `TAVILY_API_KEY` | 否 | 非空时允许隔离规划器只根据当前公开问题决定是否联网；最终回答模型没有工具权限 |
-| `API_HOST` | 否 | FastAPI 监听地址，默认 `127.0.0.1` |
-| `MAX_UPLOAD_BYTES` | 否 | 默认 25 MiB，是当前单机演示的可调整启发式值 |
-| `CHAT_TURN_LEASE_SECONDS` / `CHAT_TURN_HEARTBEAT_SECONDS` | 否 | 默认 90 / 30 秒；租约至少覆盖 3 个心跳周期，用于多 worker 的过期接管与 fencing |
-| `CHAT_STAGE_TIMEOUT_SECONDS` | 否 | 默认 30 秒；检索时是阶段总超时，direct/Agent/deep 流式生成时是相邻对外进度事件的空闲超时 |
-| `SUMMARY_LLM_TIMEOUT_SECONDS` / `SUMMARY_LLM_MAX_RETRIES` | 否 | 内部摘要默认 30 秒超时、0 次自动重试；不改变普通问答模型调用参数 |
-| `INDEX_JOB_*` | 否 | 持久化索引任务的轮询、租约、批量和退避参数；默认值是单机启发式起点，应按耗时、失败率和积压调整 |
-| `LLM_CONTEXT_MAX_CHARS` | 否 | 动态资料统一字符预算，默认 100000；DeepSeek V4 当前为 1M context，但字符并非精确 token，应结合真实成本与 token 指标校准 |
+最小必填项：
 
-可用以下命令生成 token：
+```dotenv
+DEEPSEEK_API_KEY=sk-your-key
+MYSQL_USER=root
+MYSQL_PASSWORD=your-password
+MYSQL_DATABASE=ai_qa
+APP_ACCESS_TOKEN=请替换为足够长的随机值
+APP_USER_ID=default-user
+```
 
-```bash
+可以使用 Python 生成访问 token：
+
+```powershell
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-### 3. 初始化与启动
+主要配置项：
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `LLM_MODEL` | `deepseek-v4-flash` | DeepSeek 兼容模型名 |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容 API 地址 |
+| `TAVILY_API_KEY` | 空 | 留空时禁用联网搜索 |
+| `MYSQL_HOST` / `MYSQL_PORT` | `localhost` / `3306` | MySQL 地址 |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Web 会话与限流使用的 Redis 地址 |
+| `APP_WEB_SESSION_TTL_SECONDS` | `604800` | 本地 Web 登录会话有效期 |
+| `MAX_UPLOAD_BYTES` | `26214400` | 单个上传文件最大字节数，默认 25 MiB |
+| `CHAT_STAGE_TIMEOUT_SECONDS` | `30` | 检索总超时或流式阶段无进度超时 |
+| `CHAT_TURN_LEASE_SECONDS` | `90` | 问答执行租约时间 |
+| `CHAT_TURN_HEARTBEAT_SECONDS` | `30` | 问答租约续期周期；租约必须至少是它的 3 倍 |
+| `INDEX_JOB_POLL_SECONDS` | `5` | 索引补偿任务轮询周期 |
+| `INDEX_JOB_LEASE_SECONDS` | `120` | 单个索引任务租约时间 |
+| `INDEX_JOB_MAX_ATTEMPTS` | `10` | 自动索引最大尝试次数 |
+| `INDEX_JOB_RETRY_BASE_SECONDS` | `30` | 索引退避起始时间 |
+| `INDEX_JOB_RETRY_MAX_SECONDS` | `1800` | 索引退避上限 |
+| `SUMMARY_LLM_TIMEOUT_SECONDS` | `30` | 摘要模型超时 |
+| `SUMMARY_LLM_MAX_RETRIES` | `0` | 摘要模型 SDK 自动重试次数 |
+| `LLM_CONTEXT_MAX_CHARS` | `100000` | 注入模型的动态资料字符预算 |
+| `RAG_RELEVANCE_THRESHOLD` | `0.5` | 文档与笔记检索相关度阈值 |
+| `CHROMA_PERSIST_DIR` | `./data/chroma_db` | Chroma 持久化目录 |
+| `UPLOAD_DIR` | `./data/uploads` | 上传文件目录 |
+
+这些超时、租约、批量和大小限制是单机部署的可调默认值。生产部署前应根据真实文件大小、索引耗时、失败率、任务积压和 LLM 成本重新校准。
+
+### 4. 初始化或升级数据库
 
 ```powershell
-python -m db.init_db
+python -m db.init_db --upgrade
+alembic current
+```
 
-# Windows：双击 start.bat，或在终端执行
+`db.init_db` 会安全补齐结构并通过 Alembic 升级到最新 revision。对于没有 Alembic 版本记录的旧数据库，只有在现有结构通过完整性检查后才会接管；残缺数据库不会被错误标记为最新。
+
+以下命令会清空所有业务数据，只能用于明确需要重建的开发环境：
+
+```powershell
+python -m db.init_db --drop
+```
+
+### 5. 启动项目
+
+Windows 可以直接双击 `start.bat`，或运行：
+
+```powershell
 .\start.bat
 ```
 
-升级已有数据库时，先停止服务并执行 `python -m db.init_db --upgrade`。新库由 Alembic 直接升级到 head；未版本化旧库会先通过原有结构补齐和完整性门禁，校验成功后才接管并继续版本迁移，不能把残缺库直接标记为最新。应用启动时会校验业务结构与 Alembic revision，结构过旧时拒绝启动并给出升级命令。`--drop` 仍仅用于明确需要清空全部数据的重建场景。
-
-`start.bat` 会优先使用项目的 `venv`，并行拉起 FastAPI 和 React Web 工作区，等待服务健康检查通过后自动打开 `http://127.0.0.1:5173/app/`。启动器使用一次性凭证换取 HttpOnly Cookie，长期 `APP_ACCESS_TOKEN` 不会打包进浏览器。按 `Ctrl+C` 会一起关闭两个服务；若端口已被旧进程占用会明确报错。跨平台环境可以直接运行同一启动器：
+跨平台启动方式：
 
 ```bash
 python launcher.py
 ```
 
-也可以在两个终端中分别启动，便于单独调试：
+启动器会同时管理 FastAPI 和 Vite，等待服务就绪后打开 `http://127.0.0.1:5173/app/`。它使用一次性 bootstrap token 换取 HttpOnly Cookie，长期 `APP_ACCESS_TOKEN` 不会写入浏览器 URL 或前端构建。
 
-```bash
+也可以在两个终端中分别启动：
 
-# 终端一：后端
+```powershell
+# 终端一
 python -m app.main
 
-# 终端二：React 工作区
+# 终端二
 cd web
 npm run dev
 ```
 
-问答、笔记和文档管理均位于 `http://127.0.0.1:5173/app/`。健康检查位于 `http://127.0.0.1:8000/`；服务端客户端使用 Bearer token，浏览器工作区使用仅本机签发的 HttpOnly 会话。后端启动时会幂等创建 `APP_USER_ID` 对应的固定用户，新数据库无需先访问某个前端页面来完成用户初始化。
+常用地址：
 
-## 验证与实测证据
+- Web 工作区：`http://127.0.0.1:5173/app/`
+- 后端健康检查：`http://127.0.0.1:8000/`
+- OpenAPI 文档：`http://127.0.0.1:8000/docs`
 
-### 自动化测试
+执行 `npm run build` 后，FastAPI 会在检测到 `web/dist` 时把生产前端挂载到 `/app`。
 
-```bash
+## API 概览
+
+除 Web 登录接口外，业务 API 需要以下任一认证方式：
+
+- 服务端客户端：`Authorization: Bearer <APP_ACCESS_TOKEN>`
+- React Web：本机登录流程签发的 HttpOnly Cookie
+
+所有业务资源还会校验请求中的 `user_id` 是否等于服务端固定的 `APP_USER_ID`。
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `POST /api/v1/sessions` | 创建会话 |
+| `GET /api/v1/sessions` | 分页列出会话 |
+| `DELETE /api/v1/sessions/{session_id}` | 删除会话及关联数据 |
+| `POST /api/v1/documents` | 上传并索引文档 |
+| `GET /api/v1/documents` | 分页列出文档与索引状态 |
+| `DELETE /api/v1/documents/{document_id}` | 提交文档删除任务 |
+| `POST /api/v1/notes` | 创建笔记 |
+| `GET /api/v1/notes` | 分页读取完整笔记 |
+| `GET /api/v1/notes/summaries` | 分页读取笔记摘要 |
+| `GET /api/v1/notes/{note_id}` | 读取单篇笔记 |
+| `PUT /api/v1/notes/{note_id}` | 按版本更新笔记 |
+| `DELETE /api/v1/notes/{note_id}` | 提交笔记删除任务 |
+| `POST /api/v1/chat` | normal/deep SSE 流式问答 |
+| `GET /api/v1/chat/turn` | 查询幂等问答状态或获取完成结果 |
+| `GET /api/v1/chat/history` | 分页读取已持久化消息 |
+
+列表接口统一支持 `limit` 和 `offset`，其中 `limit` 范围为 1～100。
+
+Chat SSE 事件包括：
+
+- `status`：deep 模式阶段状态或工具状态
+- `token`：回答增量文本
+- `sources`：规范化后的来源列表
+- `done`：本轮完成
+- `error`：本轮失败
+
+## 测试与质量检查
+
+后端：
+
+```powershell
 python -m pytest -q
 python -m pip check
-python -m compileall -q app agents db evaluation memory rag tools
+python -m compileall -q app agents db evaluation indexing memory migrations rag tools tests
+python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
+```
+
+前端：
+
+```powershell
 cd web
 npm test -- --run
 npm run lint
 npm run build
 ```
 
-2026-07-29 在 Python 3.11、Node.js 24 和 Edge 本地环境的结果：
+当前修复分支最近一次本地回归结果：
 
-| 检查 | 实际结果 |
+| 检查 | 结果 |
 | --- | --- |
-| pytest | 194 passed；覆盖持久化会话摘要、幂等 turn、租约接管与 fencing、原子消息对、schema 增量升级与启动恢复 |
-| React 前端 | 55 passed；覆盖笔记离开前保存、会话历史恢复、失败重试、重复发送防护、并发会话删除、文档上传/删除、normal/deep、SSE 任意分块和安全 Markdown；TypeScript 检查和 Vite 生产构建通过并纳入 CI |
-| Edge 笔记切换 | 9 篇真实笔记：未缓存切换 70 ms，缓存切换 19 ms；控制台 0 error |
-| Edge React 问答 | 真实 normal/deep SSE 流程完成；桌面与 390 px 移动布局通过；控制台 0 error/warning，浏览器存储与 URL 无凭证 |
-| Edge React 文档 | 真实上传、索引和删除闭环完成并自动清理；1440/768/320 px 无横向溢出，控制台 0 error/warning，浏览器存储与 URL 无凭证 |
-| 后端模块导入 | 优化前单次冷导入约 20.97 秒；惰性加载后，三次独立进程实测 1.515–1.548 秒 |
+| pytest | 223 passed |
+| Vitest | 60 passed |
+| TypeScript + Vite 生产构建 | 通过 |
+| Python compileall | 通过 |
 | pip check | No broken requirements found |
-| 本地服务联调 | 根路径 200；带正确 token 的空测试用户会话查询 200；Redis PING 成功 |
-| 故障路径 | 覆盖 LLM/网络中断、幂等重试与结果重放、Redis 不参与问答、超限上传、Chroma 删除失败、跨用户访问和摘要会话删除 |
 
-仓库提供 `npm run test:e2e:chat` 做真实 normal/deep 问答与自动清理，`npm run test:e2e:documents` 做真实文档上传、响应式检查和自动删除，`npm run test:e2e:chat -- --visual-only` 可复用既有会话做无 LLM 成本的桌面/移动视觉检查。正式演示前仍建议在目标机器手动走一遍上传、问答、切换与删除流程。
+需要运行中的 MySQL、Redis、后端和有效 LLM 配置时，可以执行：
 
-### 无密钥 RAG 离线评测
-
-```bash
-python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
+```powershell
+cd web
+npm run test:e2e:chat
+npm run test:e2e:documents
 ```
 
-已提交的实际结果见 [`evaluation/results/lexical_baseline.json`](evaluation/results/lexical_baseline.json)：
+GitHub Actions 会在 push、pull request 和手动触发时：
 
-| 数据集 / 检索器 | 样本 | Recall@2 | 来源覆盖@2 | 引用完整性 |
-| --- | ---: | ---: | ---: | ---: |
-| `aiqa-public-mini-v1` / `deterministic-char-bigram-v1` | 4 文档 / 4 问题 | 1.00 | 1.00 | 1.00 |
+1. 安装固定版本的 Python 依赖并执行 `pip check`；
+2. 启动 MySQL 8.4 service，执行数据库升级并确认 Alembic revision；
+3. 编译 Python 源码、运行全部 pytest 和离线 RAG 基线；
+4. 使用 `npm ci` 安装前端依赖，运行 Vitest 和生产构建。
 
-指标定义：
-
-- **Recall@K**：前 K 个结果至少命中一个期望来源的问题比例。
-- **来源覆盖@K**：被前 K 个结果找回的期望来源数 / 全部期望来源数。
-- **引用完整性**：固定参考答案中实际引用的期望来源数 / 全部期望来源数。
-
-这些结果只验证公开合成小样本、指标实现与确定性轻量检索基线，**不代表生产数据分布**；默认评测器不是线上使用的 BGE embedding，引用完整性也不评估实时 LLM 生成质量。结果记录数据集 SHA-256、检索器版本、运行时间和逐题分数，便于复核而不是夸大模型效果。
-
-### CI
-
-`.github/workflows/test.yml` 在 push、pull request 和手动触发时执行依赖安装、`pip check`、源码编译、全量测试和离线评测。CI 使用明确的占位环境变量，不读取仓库 secret，也不调用 MySQL、Redis 或付费 LLM。
-
-工作流采用官方 `actions/checkout@v6` 与 `actions/setup-python@v6`，核对日期为 2026-07-27。
+CI 不调用付费 LLM，也不需要真实 API 密钥。Redis 和浏览器 E2E 不在常规 CI 中启动。
 
 ## 可观测性与隐私
 
-每个 HTTP 请求返回 `X-Request-ID`。Chat turn 使用独立 `turn_id`，主要事件包括：
+每个 HTTP 请求返回 `X-Request-ID`，Chat 使用独立 `turn_id` 串联执行过程。主要结构化事件包括：
 
 - `request_completed`
 - `turn_started`
 - `turn_retrieval_completed`
 - `turn_first_token`
-- `turn_completed` / `turn_failed` / `turn_cancelled`
-- `turn_stage_failed`（已完成回答的派生状态降级）
+- `turn_completed`
+- `turn_failed`
+- `turn_cancelled`
+- `turn_stage_failed`
 
-事件消息为 JSON，只允许记录关联 ID、route 模板、状态码、模式、阶段、计数、耗时和错误类型。日志辅助函数会拒绝 `content`、`question`、`prompt`、`token`、`authorization` 等敏感字段名；不要在其他日志中自行输出请求体或完整异常上游响应。
-
-## 安全边界与已知限制
-
-- Bearer token + 固定 `APP_USER_ID` 是单用户演示边界，不是注册、密码、角色、刷新 token 或完整多租户认证。
-- Web 会话只解决本机单用户演示的浏览器凭证隔离，不是完整多租户认证；公网部署前应增加 HTTPS、正式身份认证、限流和网络访问控制。
-- Redis 仍用于 React 的 HttpOnly 登录会话和登录限流；删除会话时还会尽力清理升级前遗留的固定对话 key，但不会读取或新写入这类数据。Redis 不可用时 Web 登录会返回 503，但 MySQL 中的会话、消息和摘要不会丢失，服务端 Bearer 客户端也不依赖 Redis 读取对话事实。
-- 启动器为本地 8000/5173 健康探测设置 1 秒 socket 超时参数，并在批处理和 Python 探测前分别立即输出进度；1 秒是针对回环地址的可调启发式值，不是完整请求耗时或网络服务 SLA。2026-07-29 核对的 Python 官方文档说明 `urlopen(..., timeout=...)` 会为阻塞操作设置超时。参考 [urllib.request.urlopen](https://docs.python.org/3/library/urllib.request.html#urllib.request.urlopen)。
-- ChatTurn 使用数据库时钟、每次执行独立 owner、90 秒租约与 30 秒心跳；多 worker 启动时只回收无租约或已过期的 turn，旧 worker 受 fencing 约束不能覆盖新 owner。90/30 是结合当前 30 秒流式空闲超时设定的启发式默认值，并非容量结论；生产部署应根据事件循环阻塞、数据库延迟和故障恢复指标重新校准。
-- `CHAT_STAGE_TIMEOUT_SECONDS=30` 延续项目原有 direct 流式空闲边界，并统一用于检索、Agent 与 deep 阶段；这是可调启发式默认值，不是上游 SLA。2026-07-29 核对的 Python 官方文档说明超时会取消当前等待，但线程中的同步工作不能被强制终止；DeepSeek 官方文档也只承诺等待期间发送 keep-alive，不提供应用层推荐时限。参考 [Python asyncio timeouts](https://docs.python.org/3/library/asyncio-task.html#timeouts) 与 [DeepSeek FAQ](https://api-docs.deepseek.com/faq)。
-- FastAPI 与 Vite 默认只监听 `127.0.0.1`；不要直接把开发服务端口暴露到公网。
-- Chroma 的用户隔离依赖 metadata filter，而不是物理分库；当前后端再通过固定用户 ID 限制访问。
-- 系统未实现恶意文件扫描、复杂内容沙箱、全链路指标后端、告警、自动备份恢复演练或生产级容量验证。
-- 25 MiB 上传上限来自当前单机演示约束，部署前应以真实文档的解析耗时、峰值内存和 embedding 成本重新校准。
-
-租约方案于 2026-07-29 对照了 MySQL 8.4 官方说明：`GET_LOCK()` 会在持有它的数据库会话结束时释放，而空闲连接又受 `wait_timeout` 管理，因此不再用长时间持有的命名锁代表应用实例存活；参考 [Locking Functions](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html) 与 [Server System Variables](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html)。
-
-## 适合简历的表述参考
-
-> 设计并实现基于 React、FastAPI、LangGraph、Chroma、MySQL 与 Redis 的知识库问答系统，支持文档上传管理、normal/deep 双模式 SSE 流式回答、MySQL 持久化会话和笔记自动保存；以 client turn ID、原子消息事务和结果重放修复流式失败一致性，引入 HttpOnly 本机会话、流式上传限制和低敏感 turn 级可观测性，并以 Python/React 自动化测试、无密钥 CI 与可复现离线评测固化工程证据。
-
-面试时建议重点解释三个取舍：为什么 MySQL 是权威数据源、为什么 Chroma 是可重建索引且 Redis 只承载临时 Web 会话、为什么公开评测基线不能等同于线上模型质量。
+日志只应记录关联 ID、路由模板、状态码、模式、阶段、数量、耗时和错误类型。日志辅助函数会拒绝 `content`、`question`、`prompt`、`token`、`authorization` 等敏感字段名。
 
 ## 项目结构
 
 ```text
-agents/       LangGraph 深度研究工作流
-app/          FastAPI 路由、认证、错误处理、SSE 与可观测性
-db/           SQLAlchemy 模型、连接与建表脚本
-evaluation/   公开数据集、无密钥评测 CLI 和实际结果
-memory/       短期、情景和语义记忆
-rag/          Loader、Splitter、Chroma、Retriever 与 LLM 封装
-tests/        自动化测试
-tools/        隔离的联网规划与 Tavily 结构化搜索
-web/          React 问答、笔记与文档工作区、组件测试和 Edge E2E
+agents/       LangGraph 拆题、检索和整合工作流
+app/          FastAPI 路由、认证、SSE、错误处理和可观测性
+db/           SQLAlchemy 模型、数据库连接、结构检查和初始化入口
+migrations/   Alembic 可逆迁移脚本
+indexing/     MySQL 持久化索引任务、租约、重试和补偿执行器
+memory/       会话摘要、情景记忆、语义笔记和统一上下文检索
+rag/          文档加载、分块、向量库、上下文预算和 LLM 封装
+tools/        隔离的联网规划和 Tavily 结构化搜索
+evaluation/   公开小样本、离线评测 CLI 和基线结果
+tests/        后端自动化测试
+web/          React 工作区、组件测试和浏览器 E2E 脚本
 ```
+
+## 当前边界
+
+- 当前采用固定 `APP_USER_ID`，没有注册、密码、角色、刷新 token 或完整多租户隔离。
+- Chroma 的用户隔离依赖 metadata filter，不是物理分库；MySQL 回查负责最终权威校验。
+- Redis 不可用时 React Web 登录会失败，但 MySQL 中的会话、消息和摘要不会丢失。
+- 尚未实现恶意文件扫描、内容沙箱、生产级指标后端、告警、自动备份恢复演练和容量验证。
+- FastAPI 与 Vite 默认只监听 `127.0.0.1`。公网部署前必须增加 HTTPS、正式身份认证、限流、网络访问控制和独立的生产进程管理。
+- 离线 RAG 基线验证的是确定性公开小样本与指标实现，不等同于真实数据分布下的线上 LLM 质量。
+
+## 数据库迁移与恢复原则
+
+- MySQL 是权威事实来源；Chroma、摘要和索引任务状态都可以根据权威记录恢复或重建。
+- 升级前应备份 MySQL 和上传目录，先停止写入服务，再执行 `python -m db.init_db --upgrade`。
+- 不要通过手工修改 `alembic_version` 跳过结构检查。
+- 不要把 `python -m db.init_db --drop` 用于包含有效数据的环境。
