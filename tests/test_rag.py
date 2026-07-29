@@ -103,3 +103,46 @@ def test_filter_by_relevance_all_filtered():
     ]
     result = _filter_by_relevance(docs, threshold=0.5)
     assert result == []
+
+
+def test_delete_documents_uses_chroma_where_contract(monkeypatch):
+    """langchain-chroma 删除 metadata 必须使用底层支持的 where 参数。"""
+    from unittest.mock import MagicMock
+
+    from rag import vector_store
+
+    store = MagicMock()
+    monkeypatch.setattr(vector_store, "get_rag_vector_store", lambda: store)
+
+    vector_store.delete_documents_by_mysql_id("doc-1")
+
+    store.delete.assert_called_once_with(where={"mysql_id": "doc-1"})
+
+
+def test_document_upsert_uses_stable_ids_and_removes_stale_chunks(monkeypatch):
+    """重试或重建不能产生重复向量，分块缩短时应删除多余旧块。"""
+    from unittest.mock import MagicMock
+
+    from rag import vector_store
+
+    store = MagicMock()
+    store.get.return_value = {
+        "ids": [
+            "document-doc-1-chunk-0",
+            "document-doc-1-chunk-1",
+        ]
+    }
+    monkeypatch.setattr(vector_store, "get_rag_vector_store", lambda: store)
+
+    vector_store.add_documents_to_rag(
+        user_id="u1",
+        mysql_id="doc-1",
+        source="source.txt",
+        chunks=[Document(page_content="new content")],
+        created_at="2026-07-29T00:00:00",
+        index_version=2,
+    )
+
+    assert store.add_texts.call_args.kwargs["ids"] == ["document-doc-1-chunk-0"]
+    assert store.add_texts.call_args.kwargs["metadatas"][0]["index_version"] == 2
+    store.delete.assert_called_once_with(ids=["document-doc-1-chunk-1"])

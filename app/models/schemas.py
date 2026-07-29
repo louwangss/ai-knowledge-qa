@@ -1,21 +1,20 @@
 """Pydantic 请求/响应模型"""
 from datetime import datetime
-from pydantic import BaseModel
+from typing import Literal
+from uuid import UUID
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+
+from app.note_version import build_note_version
 
 
-# ---- User ----
-
-class UserCreate(BaseModel):
-    username: str
+MAX_NOTE_CONTENT_BYTES = 65_535
 
 
-class UserResponse(BaseModel):
-    id: str
-    username: str
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
+def _validate_note_content_bytes(value: str | None) -> str | None:
+    """MySQL TEXT 按字节限制容量，按 UTF-8 编码在 API 边界校验。"""
+    if value is not None and len(value.encode("utf-8")) > MAX_NOTE_CONTENT_BYTES:
+        raise ValueError("笔记正文过长")
+    return value
 
 
 # ---- Session ----
@@ -25,6 +24,8 @@ class SessionCreate(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     user_id: str
     title: str | None
@@ -32,13 +33,11 @@ class SessionResponse(BaseModel):
     created_at: datetime
     last_active: datetime
 
-    class Config:
-        from_attributes = True
-
-
 # ---- Document ----
 
 class DocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     filename: str
     file_type: str
@@ -47,44 +46,60 @@ class DocumentResponse(BaseModel):
     status: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
-
 # ---- Chat ----
 
 class ChatRequest(BaseModel):
     user_id: str
     session_id: str
     message: str
-    mode: str = "normal"  # normal / deep
+    mode: Literal["normal", "deep"] = "normal"
+    client_turn_id: UUID | None = None
+
+    _validate_message = field_validator("message")(_validate_note_content_bytes)
+
+
+class ChatSourceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    source: str
+    score: float
+
+class ChatTurnStatusResponse(BaseModel):
+    client_turn_id: UUID
+    status: Literal["processing", "completed", "failed"]
 
 
 class ChatMessage(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     role: str
     content: str
     mode: str | None
     created_at: datetime
-
-    class Config:
-        from_attributes = True
-
+    sources: list[ChatSourceResponse] | None = None
 
 # ---- Note ----
 
 class NoteCreate(BaseModel):
     user_id: str
-    concept: str
-    content: str
+    concept: str = Field(default="", max_length=100)
+    content: str = ""
+
+    _validate_content = field_validator("content")(_validate_note_content_bytes)
 
 
 class NoteUpdate(BaseModel):
-    concept: str | None = None
+    concept: str | None = Field(default=None, max_length=100)
     content: str | None = None
+    version: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    _validate_content = field_validator("content")(_validate_note_content_bytes)
 
 
 class NoteResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     user_id: str
     concept: str | None
@@ -92,5 +107,14 @@ class NoteResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    @computed_field
+    @property
+    def version(self) -> str:
+        return build_note_version(self.concept, self.content)
+
+class NoteSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    concept: str | None
+    updated_at: datetime

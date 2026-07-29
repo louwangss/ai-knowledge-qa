@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "evaluated_at": "2026-07-29T11:28:49.989754Z",
+  "dataset": {
+    "id": "aiqa-public-mini-v1",
+    "version": "1.1.0",
+    "sha256": "70110ab480bc518b5042caea3e2d2c55a6fdcb4d5b706401ce0d341eeba09a5d",
+    "document_count": 4,
+    "case_count": 4
+  },
+  "retriever": {
+    "name": "deterministic_char_bigram_cosine",
+    "version": "deterministic-char-bigram-v1",
+    "top_k": 2
+  },
+  "metrics": {
+    "recall_at_k": 1.0,
+    "source_coverage_at_k": 1.0,
+    "citation_completeness": 1.0
+  },
+  "cases": [
+    {
+      "id": "rag-flow",
+      "expected_sources": [
+        "rag_intro.md"
+      ],
+      "retrieved_sources": [
+        "rag_intro.md",
+        "deep_research.md"
+      ],
+      "scores": [
+        0.287599,
+        0.176394
+      ],
+      "retrieval_hit": true,
+      "reference_citations": [
+        "rag_intro.md"
+      ]
+    },
+    {
+      "id": "memory-persistence",
+      "expected_sources": [
+        "memory_design.md"
+      ],
+      "retrieved_sources": [
+        "memory_design.md",
+        "security_boundary.md"
+      ],
+      "scores": [
+        0.271607,
+        0.02008
+      ],
+      "retrieval_hit": true,
+      "reference_citations": [
+        "memory_design.md"
+      ]
+    },
+    {
+      "id": "deep-stages",
+      "expected_sources": [
+        "deep_research.md"
+      ],
+      "retrieved_sources": [
+        "deep_research.md",
+        "rag_intro.md"
+      ],
+      "scores": [
+        0.481604,
+        0.027714
+      ],
+      "retrieval_hit": true,
+      "reference_citations": [
+        "deep_research.md"
+      ]
+    },
+    {
+      "id": "safe-default-bind",
+      "expected_sources": [
+        "security_boundary.md"
+      ],
+      "retrieved_sources": [
+        "security_boundary.md",
+        "rag_intro.md"
+      ],
+      "scores": [
+        0.240966,
+        0.025924
+      ],
+      "retrieval_hit": true,
+      "reference_citations": [
+        "security_boundary.md"
+      ]
+    }
+  ],
+  "limitations": [
+    "公开合成小样本仅验证评测链路与轻量检索基线，不代表生产数据分布。",
+    "默认检索器不是生产使用的 BGE embedding，不能据此推断线上向量检索效果。",
+    "引用完整性针对固定参考答案计算，不评估实时 LLM 生成质量。"
+  ]
+}

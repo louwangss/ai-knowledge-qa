@@ -1,0 +1,442 @@
+"""单用户 Bearer token 与资源归属边界测试。"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.testclient import TestClient
+
+AUTH_HEADERS = {"Authorization": "Bearer test-access-token"}
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+class FakeSessionRedis:
+    def __init__(self):
+        self.values = {}
+        self.expirations = {}
+
+    def set(self, key, value, ex=None):
+        self.values[key] = value
+        self.expirations[key] = ex
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def exists(self, key):
+        return int(key in self.values)
+
+    def incr(self, key):
+        value = int(self.values.get(key, 0)) + 1
+        self.values[key] = value
+        return value
+
+    def expire(self, key, seconds):
+        if key not in self.values:
+            return False
+        self.expirations[key] = seconds
+        return True
+
+    def delete(self, key):
+        existed = key in self.values
+        self.values.pop(key, None)
+        self.expirations.pop(key, None)
+        return int(existed)
+
+
+@pytest.fixture
+def mock_db():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    return db
+
+
+@pytest.fixture
+def client(mock_db):
+    from app.deps import get_db
+    from app.main import app
+
+    def override_get_db():
+        yield mock_db
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_root_is_public(client):
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_protected_route_rejects_missing_token(client):
+    response = client.get("/api/v1/sessions", params={"user_id": "u1"})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_protected_route_rejects_wrong_token_without_leaking_it(client, caplog):
+    wrong_token = "wrong-token-must-not-leak"
+
+    response = client.get(
+        "/api/v1/sessions",
+        params={"user_id": "u1"},
+        headers={"Authorization": f"Bearer {wrong_token}"},
+    )
+
+    assert response.status_code == 401
+    assert wrong_token not in response.text
+    assert wrong_token not in caplog.text
+
+
+def test_correct_token_can_access_owned_resource(client):
+    response = client.get(
+        "/api/v1/sessions",
+        params={"user_id": "u1"},
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "request_kwargs"),
+    [
+        ("POST", "/api/v1/sessions", {"json": {"user_id": "other-user"}}),
+        ("GET", "/api/v1/sessions", {"params": {"user_id": "other-user"}}),
+        ("DELETE", "/api/v1/sessions/s1", {"params": {"user_id": "other-user"}}),
+        (
+            "POST",
+            "/api/v1/documents",
+            {
+                "data": {"user_id": "other-user"},
+                "files": {"file": ("note.txt", b"content", "text/plain")},
+            },
+        ),
+        ("GET", "/api/v1/documents", {"params": {"user_id": "other-user"}}),
+        ("DELETE", "/api/v1/documents/d1", {"params": {"user_id": "other-user"}}),
+        (
+            "POST",
+            "/api/v1/notes",
+            {"json": {"user_id": "other-user", "concept": "c", "content": "n"}},
+        ),
+        ("GET", "/api/v1/notes", {"params": {"user_id": "other-user"}}),
+        (
+            "PUT",
+            "/api/v1/notes/1",
+            {"params": {"user_id": "other-user"}, "json": {"content": "changed"}},
+        ),
+        ("DELETE", "/api/v1/notes/1", {"params": {"user_id": "other-user"}}),
+        (
+            "POST",
+            "/api/v1/chat",
+            {
+                "json": {
+                    "user_id": "other-user",
+                    "session_id": "s1",
+                    "message": "越权问题",
+                    "mode": "normal",
+                }
+            },
+        ),
+        (
+            "GET",
+            "/api/v1/chat/history",
+            {"params": {"user_id": "other-user", "session_id": "s1"}},
+        ),
+    ],
+)
+def test_other_user_id_is_rejected_before_resource_access(
+    client,
+    method,
+    path,
+    request_kwargs,
+):
+    response = client.request(
+        method,
+        path,
+        headers=AUTH_HEADERS,
+        **request_kwargs,
+    )
+
+    assert response.status_code == 403
+
+
+def test_openapi_does_not_contain_access_token(client):
+    response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    assert "test-access-token" not in response.text
+    schema = response.json()
+    for path, operations in schema["paths"].items():
+        if not path.startswith("/api/v1/") or path in {
+            "/api/v1/web/session",
+            "/api/v1/web/session/status",
+        }:
+            continue
+        for operation in operations.values():
+            assert operation["security"] == [{"AppBearerAuth": []}]
+
+
+def test_non_ascii_credentials_and_user_id_are_rejected_normally():
+    from app.deps import require_access_token, require_app_user
+
+    with pytest.raises(HTTPException) as token_error:
+        require_access_token(
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials="错误令牌")
+        )
+    with pytest.raises(HTTPException) as user_error:
+        require_app_user("其他用户")
+
+    assert token_error.value.status_code == 401
+    assert user_error.value.status_code == 403
+
+
+def test_wrong_token_cannot_open_sse_stream_or_leak_token(client):
+    wrong_token = "wrong-sse-token-must-not-leak"
+
+    response = client.post(
+        "/api/v1/chat",
+        headers={"Authorization": f"Bearer {wrong_token}"},
+        json={
+            "user_id": "u1",
+            "session_id": "s1",
+            "message": "hello",
+            "mode": "normal",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.headers["content-type"].startswith("application/json")
+    assert wrong_token not in response.text
+
+
+def test_config_rejects_app_user_id_longer_than_database_column():
+    env = os.environ.copy()
+    env["APP_USER_ID"] = "x" * 37
+    env["PYTHONUTF8"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import config"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode != 0
+    assert "APP_USER_ID 长度不能超过 36" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "APP_WEB_SESSION_TTL_SECONDS",
+        "APP_WEB_LOGIN_MAX_ATTEMPTS",
+        "APP_WEB_LOGIN_WINDOW_SECONDS",
+    ],
+)
+def test_config_rejects_non_positive_web_auth_limits(name):
+    env = os.environ.copy()
+    env[name] = "0"
+    env["PYTHONUTF8"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import config"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode != 0
+    assert f"环境变量 {name} 必须为正整数" in completed.stderr
+
+
+def test_loopback_bootstrap_creates_httponly_web_session(monkeypatch, mock_db):
+    from app.deps import get_db
+    from app.main import app
+    from app.web_auth import clear_web_auth_process_state_for_test
+
+    monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+    clear_web_auth_process_state_for_test()
+
+    def override_get_db():
+        yield mock_db
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+            assert web_client.get("/api/v1/web/session/status").json() == {
+                "authenticated": False
+            }
+            login = web_client.post(
+                "/api/v1/web/session",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"token": "single-use-bootstrap"},
+            )
+            assert login.status_code == 204
+            cookie = login.headers["set-cookie"].lower()
+            assert "httponly" in cookie
+            assert "samesite=strict" in cookie
+            assert "max-age=" in cookie
+            assert "single-use-bootstrap" not in cookie
+            assert web_client.get("/api/v1/web/session/status").json() == {
+                "authenticated": True
+            }
+
+            response = web_client.get(
+                "/api/v1/sessions",
+                params={"user_id": "u1"},
+            )
+            assert response.status_code == 200
+            config_response = web_client.get("/api/v1/web/config")
+            assert config_response.status_code == 200
+            assert config_response.json() == {"user_id": "u1"}
+    finally:
+        clear_web_auth_process_state_for_test()
+        app.dependency_overrides.clear()
+
+
+def test_web_session_survives_backend_process_state_reset(monkeypatch):
+    from app.main import app
+    from app.web_auth import clear_web_auth_process_state_for_test
+
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+    clear_web_auth_process_state_for_test()
+
+    with TestClient(app, client=("127.0.0.1", 51000)) as first_process:
+        login = first_process.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "test-access-token"},
+        )
+        assert login.status_code == 204
+        session_cookie = first_process.cookies.get("ai_knowledge_web_session")
+
+    clear_web_auth_process_state_for_test()
+    with TestClient(app, client=("127.0.0.1", 51001)) as restarted_process:
+        restarted_process.cookies.set("ai_knowledge_web_session", session_cookie)
+        assert restarted_process.get("/api/v1/web/session/status").json() == {
+            "authenticated": True
+        }
+
+
+def test_web_session_logout_revokes_server_session_and_cookie(monkeypatch):
+    from app.main import app
+
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+
+    with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+        assert web_client.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "test-access-token"},
+        ).status_code == 204
+
+        logout = web_client.delete(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+        )
+
+        assert logout.status_code == 204
+        assert "max-age=0" in logout.headers["set-cookie"].lower()
+        assert web_client.get("/api/v1/web/session/status").json() == {
+            "authenticated": False
+        }
+
+
+def test_web_session_rate_limits_repeated_invalid_credentials(monkeypatch):
+    from app.main import app
+    from config import WEB_LOGIN_MAX_ATTEMPTS
+
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+
+    with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+        for _ in range(WEB_LOGIN_MAX_ATTEMPTS):
+            response = web_client.post(
+                "/api/v1/web/session",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"token": "wrong-token"},
+            )
+            assert response.status_code == 401
+
+        blocked = web_client.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "test-access-token"},
+        )
+
+        assert blocked.status_code == 429
+        assert blocked.headers["retry-after"]
+
+
+def test_cookie_write_rejects_untrusted_origin(monkeypatch, mock_db):
+    from app.deps import get_db
+    from app.main import app
+    from app.web_auth import clear_web_auth_process_state_for_test
+
+    monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
+    redis = FakeSessionRedis()
+    monkeypatch.setattr("app.web_auth.get_redis", lambda: redis, raising=False)
+    clear_web_auth_process_state_for_test()
+
+    def override_get_db():
+        yield mock_db
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app, client=("127.0.0.1", 51000)) as web_client:
+            assert web_client.post(
+                "/api/v1/web/session",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"token": "single-use-bootstrap"},
+            ).status_code == 204
+
+            response = web_client.post(
+                "/api/v1/sessions",
+                headers={"Origin": "http://evil.example"},
+                json={"user_id": "u1"},
+            )
+            assert response.status_code == 403
+    finally:
+        clear_web_auth_process_state_for_test()
+        app.dependency_overrides.clear()
+
+
+def test_web_session_rejects_non_loopback_client(monkeypatch):
+    from app.main import app
+
+    monkeypatch.setenv("APP_WEB_BOOTSTRAP_TOKEN", "single-use-bootstrap")
+    with TestClient(app, client=("192.0.2.8", 51000)) as external_client:
+        response = external_client.post(
+            "/api/v1/web/session",
+            headers={"Origin": "http://127.0.0.1:5173"},
+            json={"token": "single-use-bootstrap"},
+        )
+
+    assert response.status_code == 403

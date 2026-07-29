@@ -6,12 +6,77 @@ from urllib.parse import quote_plus
 load_dotenv()
 
 # --- 必填校验（放在 URL 构建之前） ---
-_REQUIRED = ["DEEPSEEK_API_KEY", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"]
+_REQUIRED = [
+    "DEEPSEEK_API_KEY",
+    "MYSQL_USER",
+    "MYSQL_PASSWORD",
+    "MYSQL_DATABASE",
+    "APP_ACCESS_TOKEN",
+]
 for _key in _REQUIRED:
     if not os.getenv(_key):
         raise RuntimeError(f"环境变量 {_key} 未设置，请检查 .env 文件")
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "").strip()
+APP_USER_ID = os.getenv("APP_USER_ID", "default-user").strip()
+API_HOST = os.getenv("API_HOST", "127.0.0.1").strip()
+if not APP_ACCESS_TOKEN:
+    raise RuntimeError("环境变量 APP_ACCESS_TOKEN 不能为空")
+if not APP_USER_ID:
+    raise RuntimeError("环境变量 APP_USER_ID 不能为空")
+if len(APP_USER_ID) > 36:
+    raise RuntimeError("环境变量 APP_USER_ID 长度不能超过 36")
+if not API_HOST:
+    raise RuntimeError("环境变量 API_HOST 不能为空")
+
+
+def _positive_int_env(name: str, default: str) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError as exc:
+        raise RuntimeError(f"环境变量 {name} 必须为正整数") from exc
+    if value <= 0:
+        raise RuntimeError(f"环境变量 {name} 必须为正整数")
+    return value
+
+
+def _non_negative_int_env(name: str, default: str) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError as exc:
+        raise RuntimeError(f"环境变量 {name} 必须为非负整数") from exc
+    if value < 0:
+        raise RuntimeError(f"环境变量 {name} 必须为非负整数")
+    return value
+
+
+WEB_SESSION_TTL_SECONDS = _positive_int_env("APP_WEB_SESSION_TTL_SECONDS", "604800")
+WEB_LOGIN_MAX_ATTEMPTS = _positive_int_env("APP_WEB_LOGIN_MAX_ATTEMPTS", "10")
+WEB_LOGIN_WINDOW_SECONDS = _positive_int_env("APP_WEB_LOGIN_WINDOW_SECONDS", "300")
+
+# ChatTurn 租约是可调的启发式边界：默认覆盖 3 个心跳周期，避免短暂调度抖动误判。
+CHAT_TURN_LEASE_SECONDS = _positive_int_env("CHAT_TURN_LEASE_SECONDS", "90")
+CHAT_TURN_HEARTBEAT_SECONDS = _positive_int_env("CHAT_TURN_HEARTBEAT_SECONDS", "30")
+# 保留原普通问答 30 秒空闲边界，并统一约束检索完成时间与各流式阶段的无进度等待。
+CHAT_STAGE_TIMEOUT_SECONDS = _positive_int_env("CHAT_STAGE_TIMEOUT_SECONDS", "30")
+if CHAT_TURN_LEASE_SECONDS < CHAT_TURN_HEARTBEAT_SECONDS * 3:
+    raise RuntimeError(
+        "环境变量 CHAT_TURN_LEASE_SECONDS 必须至少为 "
+        "CHAT_TURN_HEARTBEAT_SECONDS 的 3 倍"
+    )
+
+# 索引任务默认值是单机部署的可调启发式起点；生产环境应依据任务耗时、失败率和积压监控调整。
+INDEX_JOB_POLL_SECONDS = _positive_int_env("INDEX_JOB_POLL_SECONDS", "5")
+INDEX_JOB_LEASE_SECONDS = _positive_int_env("INDEX_JOB_LEASE_SECONDS", "120")
+INDEX_JOB_BATCH_SIZE = _positive_int_env("INDEX_JOB_BATCH_SIZE", "20")
+INDEX_JOB_MAX_ATTEMPTS = _positive_int_env("INDEX_JOB_MAX_ATTEMPTS", "10")
+INDEX_JOB_RETRY_BASE_SECONDS = _positive_int_env("INDEX_JOB_RETRY_BASE_SECONDS", "30")
+INDEX_JOB_RETRY_MAX_SECONDS = _positive_int_env("INDEX_JOB_RETRY_MAX_SECONDS", "1800")
+if INDEX_JOB_RETRY_MAX_SECONDS < INDEX_JOB_RETRY_BASE_SECONDS:
+    raise RuntimeError(
+        "环境变量 INDEX_JOB_RETRY_MAX_SECONDS 不能小于 INDEX_JOB_RETRY_BASE_SECONDS"
+    )
 
 # Tavily 可选（不用 web_search 时不需要）
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
@@ -35,13 +100,24 @@ REDIS_URL = f"redis://{_redis_auth}{_redis_host}:{_redis_port}/{_redis_db}"
 # --- 路径 ---
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma_db")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./data/uploads")
+try:
+    MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+except ValueError as exc:
+    raise RuntimeError("环境变量 MAX_UPLOAD_BYTES 必须为正整数") from exc
+if MAX_UPLOAD_BYTES <= 0:
+    raise RuntimeError("环境变量 MAX_UPLOAD_BYTES 必须为正整数")
 
 # --- Embedding 模型 ---
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 
 # --- LLM ---
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+SUMMARY_LLM_TIMEOUT_SECONDS = _positive_int_env("SUMMARY_LLM_TIMEOUT_SECONDS", "30")
+SUMMARY_LLM_MAX_RETRIES = _non_negative_int_env("SUMMARY_LLM_MAX_RETRIES", "0")
+# DeepSeek V4 当前为 1M context；默认仅给动态资料 10 万字符，保留问题、指令、输出和估算误差空间。
+# 字符并非精确 token，故这是可调整的保守启发式值，应结合真实 token/成本指标校准。
+LLM_CONTEXT_MAX_CHARS = _positive_int_env("LLM_CONTEXT_MAX_CHARS", "100000")
 
 # --- RAG 检索 ---
 RAG_RELEVANCE_THRESHOLD = float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0.5"))

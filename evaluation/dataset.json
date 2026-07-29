@@ -1,0 +1,49 @@
+{
+  "dataset_id": "aiqa-public-mini-v1",
+  "version": "1.1.0",
+  "description": "为演示 AI 知识库问答系统而编写的公开合成小样本，不含用户文档或私有数据。",
+  "documents": [
+    {
+      "source": "rag_intro.md",
+      "content": "检索增强生成（RAG）先从外部知识库检索与问题相关的文档片段，再把这些片段作为上下文交给大语言模型生成回答。该方法的目标是让回答依据可追溯，并减少仅依赖模型参数知识造成的幻觉。"
+    },
+    {
+      "source": "memory_design.md",
+      "content": "系统使用 MySQL 持久化保存权威会话历史和摘要，React 重新打开会话时按会话 ID 从 MySQL 加载，因此第二天启动后仍能继续问答。Redis 只保存带过期时间的 Web 登录会话和登录限流状态，不承载对话事实。"
+    },
+    {
+      "source": "deep_research.md",
+      "content": "深度研究工作流包含三个阶段：问题拆解 Agent 生成子问题，文档检索 Agent 并行查找相关片段，结果整合 Agent 按结构生成最终回答。"
+    },
+    {
+      "source": "security_boundary.md",
+      "content": "单用户演示版的服务端 API 使用 Bearer access token 认证，React 浏览器工作区使用仅本机签发的 HttpOnly 会话，并把可访问用户固定为服务端配置的 APP_USER_ID。FastAPI 和 Vite 开发服务默认只监听 127.0.0.1，避免无意暴露到外部网络。"
+    }
+  ],
+  "cases": [
+    {
+      "id": "rag-flow",
+      "question": "RAG 如何结合知识库生成回答？",
+      "expected_sources": ["rag_intro.md"],
+      "reference_answer": "根据《rag_intro.md》，RAG 先检索相关文档片段，再把片段作为上下文交给大语言模型生成回答。"
+    },
+    {
+      "id": "memory-persistence",
+      "question": "第二天重新启动后，会话历史从哪里加载？",
+      "expected_sources": ["memory_design.md"],
+      "reference_answer": "根据《memory_design.md》，会话历史和摘要持久化在 MySQL，重新打开会话时按会话 ID 从 MySQL 加载；Redis 不保存对话事实。"
+    },
+    {
+      "id": "deep-stages",
+      "question": "深度研究包含哪些 Agent 阶段？",
+      "expected_sources": ["deep_research.md"],
+      "reference_answer": "根据《deep_research.md》，流程依次包含问题拆解、并行文档检索和结果整合三个 Agent 阶段。"
+    },
+    {
+      "id": "safe-default-bind",
+      "question": "演示服务如何避免默认暴露到外部网络？",
+      "expected_sources": ["security_boundary.md"],
+      "reference_answer": "根据《security_boundary.md》，FastAPI 与 Vite 开发服务默认只监听 127.0.0.1；服务端 API 使用 Bearer token，React 工作区使用本机 HttpOnly 会话。"
+    }
+  ]
+}

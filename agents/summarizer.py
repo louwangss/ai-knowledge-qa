@@ -2,6 +2,8 @@
 import logging
 
 from agents.state import ResearchState
+from config import CHAT_STAGE_TIMEOUT_SECONDS, LLM_CONTEXT_MAX_CHARS
+from rag.context_budget import bound_context_sections
 from rag.llm import get_llm
 
 logger = logging.getLogger(__name__)
@@ -71,19 +73,26 @@ def _build_prompt(state: ResearchState) -> str:
     else:
         stm_text = stm if stm else "无"
 
+    bounded = bound_context_sections([
+        ("documents", _format_docs(docs)),
+        ("notes", _format_notes(notes)),
+        ("short_term", stm_text),
+        ("episodic", _format_episodic(episodic)),
+    ], max_chars=LLM_CONTEXT_MAX_CHARS)
+
     prompt = f"""你是一个知识库研究助手。请基于以下检索到的资料，对用户的问题进行结构化的深度分析。
 
 # 检索到的文档资料
-{_format_docs(docs)}
+{bounded['documents']}
 
 # 用户笔记
-{_format_notes(notes)}
+{bounded['notes']}
 
 # 学习历程
-{_format_episodic(episodic)}
+{bounded['episodic']}
 
 # 对话上下文
-{stm_text}
+{bounded['short_term']}
 
 # 用户的问题
 {question}
@@ -122,7 +131,11 @@ def agent_c_summarize(state: ResearchState) -> dict:
     from langgraph.config import get_stream_writer
 
     writer = get_stream_writer()
-    llm = get_llm(temperature=0.3)
+    llm = get_llm(
+        temperature=0.3,
+        timeout=CHAT_STAGE_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
     prompt = _build_prompt(state)
 
     full_answer = ""
@@ -133,7 +146,7 @@ def agent_c_summarize(state: ResearchState) -> dict:
                 full_answer += token
                 writer({"type": "token", "content": token})
     except Exception as e:
-        logger.error(f"Agent C LLM 调用失败: {e}")
-        full_answer = f"抱歉，生成回答时发生错误：{e}"
+        logger.error("Agent C LLM 调用失败: error_type=%s", type(e).__name__)
+        raise RuntimeError("Agent C LLM 调用失败") from e
 
     return {"final_answer": full_answer}

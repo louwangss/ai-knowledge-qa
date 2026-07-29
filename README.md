@@ -1,373 +1,343 @@
 # AI 知识库问答系统
 
-一个基于 RAG（检索增强生成）和多 Agent 工作流的个人知识库问答系统。用户可上传文档、保存笔记，并在普通问答或深度研究模式下获得带来源提示的流式回答。
+一个面向个人知识管理的 RAG 问答项目。用户可以上传文档、维护笔记，并通过普通问答或多 Agent 深度研究获得带来源的流式回答。
 
-> 当前版本定位为单用户 MVP，适合本地使用或单台 Linux 云服务器部署。它不包含用户认证、租户隔离、容器化、监控告警或 CI/CD。
+项目当前定位为本地或可信内网中的单用户系统，重点处理了流式问答一致性、索引失败恢复、数据库迁移、资源归属校验和低敏感可观测性。它不是完整的多租户 SaaS，不应未经额外保护直接暴露到公网。
 
 ## 功能概览
 
-- 上传并检索 PDF、DOCX、TXT、Markdown、HTML/HTM 文档
-- 文档 SHA-256 去重，固定按 `chunk_size=1000`、`chunk_overlap=200` 切分
-- 普通问答，结合文档、笔记、情景记忆和短期对话上下文
-- 深度研究，自动拆题、并发检索并结构化整合答案
-- MySQL 持久化会话、消息、文档元数据和笔记
-- Redis 短期记忆与摘要压缩，过期后可从 MySQL 恢复
-- Chroma 持久化向量检索，使用 `BAAI/bge-small-zh-v1.5` 嵌入模型
-- 可选 Tavily 联网搜索和计算器工具调用
-- FastAPI SSE 逐 token 输出，Gradio 实时展示
+- **文档知识库**：支持 PDF、DOCX、TXT、Markdown、HTML，按内容哈希去重并通过持久化任务维护 Chroma 索引。
+- **语义笔记**：支持笔记 CRUD、版本冲突检测和向量索引同步。
+- **普通问答**：并行检索文档、笔记、情景记忆和会话上下文，使用 SSE 增量返回回答与来源。
+- **深度研究**：通过 LangGraph 完成结构化拆题、并行检索和答案整合。
+- **可选联网搜索**：仅把当前公开问题交给隔离规划器；最终回答模型不持有搜索工具权限。
+- **持久化会话**：MySQL 保存完整消息、摘要、来源和问答执行状态，刷新页面或重启服务后可以恢复。
+- **失败恢复**：文档和笔记索引由 MySQL 持久化任务驱动，支持租约、幂等执行、指数退避和失败重试。
+- **本地 Web 工作区**：React + TypeScript 提供问答、会话、文档和笔记管理界面。
 
-## 技术栈
-
-| 分类 | 技术 |
-| --- | --- |
-| 后端与前端 | FastAPI、Uvicorn、Gradio、httpx |
-| LLM 与编排 | DeepSeek 兼容 API、LangChain、LangGraph |
-| RAG | ChromaDB、Sentence Transformers、PyMuPDF、docx2txt |
-| 数据与记忆 | MySQL、Redis、SQLAlchemy |
-| 可选工具 | Tavily、numexpr |
-
-## 架构说明
+## 系统架构
 
 ```mermaid
 flowchart LR
-    U[用户] --> G[Gradio 前端 :7860]
-    G -->|HTTP + SSE| A[FastAPI :8000]
+    U["用户"] --> W["React Web :5173"]
+    W -->|"HttpOnly 会话 / REST / SSE"| A["FastAPI :8000"]
 
-    A --> C{问答模式}
-    C -->|normal| R[并行上下文检索]
-    C -->|deep| GA[Agent A: 拆解问题]
+    A --> M{"问答模式"}
+    M -->|"normal"| R["统一上下文检索"]
+    M -->|"deep"| D["拆题 Agent"]
+    D --> P["并行检索 Agent"]
+    P --> S["整合 Agent"]
 
-    R --> CH[(Chroma\n文档与笔记索引)]
-    R --> MY[(MySQL\n会话、消息、笔记、事件)]
-    R --> RE[(Redis\n短期记忆与摘要)]
-
-    GA --> GB[Agent B: 并发检索]
-    GB --> CH
-    GB --> GC[Agent C: 结构化整合]
-
-    R --> L[DeepSeek 兼容 LLM API]
-    GC --> L
-    A -. 可选工具调用 .-> T[Tavily Web Search]
-    A -. 可选工具调用 .-> K[Calculator]
+    R --> V[("Chroma 派生向量索引")]
+    P --> V
+    R --> DB[("MySQL 权威数据与任务状态")]
+    A --> DB
+    A --> RD[("Redis Web 会话与登录限流")]
+    R --> L["DeepSeek 兼容 LLM"]
+    S --> L
+    A -. "可选" .-> T["Tavily 公开搜索"]
 ```
 
-### 文档入库链路
+### 数据职责
 
-1. 前端向 `POST /api/v1/documents` 上传文件。
-2. 后端计算内容哈希，拒绝重复上传。
-3. Loader 解析文本，Splitter 按 `1000 / 200` 参数分块。
-4. 使用 `BAAI/bge-small-zh-v1.5` 生成向量，写入 Chroma 的 `rag_documents` collection。
-5. 文档元数据写入 MySQL，原始文件保存到 `UPLOAD_DIR`。
-
-### 普通问答链路
-
-1. `POST /api/v1/chat` 先将用户消息写入 MySQL。
-2. Redis 若过期或不完整，先从 MySQL 恢复摘要和未压缩消息。
-3. 并行检索文档、用户笔记、情景记忆与短期对话记录。
-4. 将上下文注入 Prompt，调用 LLM 并经 SSE 返回增量 token。
-5. 回答写入 MySQL 和 Redis，必要时压缩早期对话，并记录 `qa_completed` 事件。
-
-### 深度研究链路
-
-深度模式采用 LangGraph 的线性工作流：
-
-1. **Agent A，问题拆解**：把原问题拆成 3 至 5 个可检索子问题。
-2. **Agent B，文档检索**：通过线程池并行检索每个子问题，按文档内容去重。
-3. **Agent C，结果整合**：按“概述、详细分析、关联总结”组织回答，并逐 token 写入 LangGraph custom stream。
-
-### 三层记忆
-
-| 层级 | 存储 | 作用 |
-| --- | --- | --- |
-| 短期记忆 | Redis + MySQL 摘要备份 | 保存近期消息。TTL 为 30 分钟，第 11 轮首次压缩，之后每 5 轮压缩一次。 |
-| 情景记忆 | MySQL | 记录完成问答等关键事件，辅助理解用户学习历程。 |
-| 语义记忆 | MySQL + Chroma 索引 | 保存用户笔记，MySQL 为主数据源，Chroma 用于语义检索。 |
-
-## 关键 Prompt 与 Vibe 思路
-
-本项目将 Prompt 视作可维护的应用逻辑，而不是一次性文案。核心原则是将模型能力限制在可追溯的上下文中，并用明确输出结构提升稳定性。
-
-| 位置 | 目标与约束 |
+| 组件 | 职责 |
 | --- | --- |
-| `app/api/routes_chat.py::NORMAL_PROMPT` | 注入文档、笔记、情景记忆和对话上下文。优先引用文档，未检索到时必须明确说明，禁止凭模型自身知识编造。 |
-| `app/api/routes_chat.py::_agent_stream` | 在保留知识库优先原则的前提下，允许模型按需调用联网搜索或计算器。 |
-| `agents/decomposer.py::PROMPT` | 通过 few-shot 示例约束模型输出 3 至 5 个简洁子问题，并要求 JSON 数组格式。 |
-| `agents/summarizer.py::_build_prompt` | 将深度研究答案固定为概述、详细分析、关联总结，并要求关键事实标注文档来源。 |
-| `memory/short_term.py::_generate_summary` | 将早期消息压缩为约 200 至 300 字摘要，保留主题、结论和涉及的文档或笔记。 |
+| MySQL | 用户、会话、完整聊天记录、摘要、来源、文档、笔记、情景记忆、问答状态和索引任务的权威数据源 |
+| ChromaDB | 文档与笔记的可重建向量索引；检索结果必须通过 MySQL 状态和版本校验 |
+| Redis | React Web 的 HttpOnly 登录会话和登录限流；不保存权威对话内容 |
+| 本地文件系统 | 保存上传原文件；文件状态由 MySQL 文档记录管理 |
 
-### Vibe 与 AI 辅助开发思路
+### Chat 执行流程
 
-- **先约束再生成**：用“引用来源、信息不足时直说、禁止编造”等规则降低幻觉风险。
-- **结构优先**：拆题使用 JSON，深度回答使用固定 Markdown 层级，方便后续解析、展示和测试。
-- **渐进式增强**：默认走稳定的 RAG 流式链路，仅在配置 `TAVILY_API_KEY` 后启用工具型 Agent。
-- **可追溯迭代**：Prompt 优化通过 Git 提交记录，便于比较效果和回滚。
-- **AI 编程上下文**：仓库保留项目架构、运行约定与实现规划，帮助 AI 编程助手在已有边界内完成迭代。该说明不代表项目由某个特定 AI 工具自动生成。
+```text
+认证和资源归属校验
+  -> 预占 client_turn_id 并获取有期限的执行租约
+  -> 从 MySQL 读取已完成历史和摘要
+  -> 并行检索上下文
+  -> normal 或 deep 流式生成，并定期续租
+  -> 单事务写入 user、assistant、sources 和 completed turn
+  -> best-effort 更新摘要与情景记忆
+  -> 返回 sources 和 done 事件
+```
 
-## AI 调用逻辑
+`client_turn_id` 是一次问答的幂等键。连接中断后，客户端可以使用同一 ID 查询状态或重试；已经完成的回答会直接重放。租约过期后其他 worker 可以接管任务，旧 owner 不能覆盖新执行结果。
 
-### DeepSeek 兼容调用与流式输出
+### 索引任务流程
 
-- `rag/llm.py` 统一创建 `ChatOpenAI` 实例，默认模型为 `deepseek-chat`，可通过 `LLM_MODEL` 和 `LLM_BASE_URL` 覆盖。
-- 普通模式使用 `llm.astream()` 异步读取增量内容。
-- `stream_with_idle_timeout()` 为每个 chunk 设定 30 秒空闲超时，避免请求无限挂起。
-- API 返回 `text/event-stream`，事件类型包括：
+文档或笔记变更时，业务记录与 `index_jobs` 任务在同一数据库事务中提交。任务使用稳定向量 ID 和索引版本执行 upsert/delete；进程退出、Chroma 暂时不可用或 embedding 失败时，后台补偿循环会继续处理未完成任务。
 
-| SSE 事件 | 含义 |
+文档状态包括 `indexing`、`ready`、`failed` 和 `deleting`。只有与 MySQL 当前版本一致且状态为 `ready` 的文档可以进入检索；重复上传失败文档会触发手动重试。
+
+## 技术栈
+
+| 领域 | 技术 |
 | --- | --- |
-| `token` | 回答的增量文本 |
-| `status` | 深度研究阶段或联网搜索状态 |
-| `sources` | 文档和联网搜索来源 |
-| `done` | 本轮回答完成 |
-| `error` | 可显示的失败信息 |
+| 后端 | Python 3.11、FastAPI、SQLAlchemy、SSE |
+| 前端 | React 19、TypeScript、Vite |
+| LLM / Agent | DeepSeek 兼容 API、LangChain、LangGraph |
+| RAG | ChromaDB、`BAAI/bge-small-zh-v1.5`、sentence-transformers |
+| 文档解析 | PyMuPDF、docx2txt、标准库 HTMLParser |
+| 数据设施 | MySQL 8、Redis、Alembic |
+| 测试与 CI | pytest、Vitest、GitHub Actions、MySQL 8.4 CI service |
 
-### Function Calling 风格的工具调用
+## 快速开始
 
-当 `TAVILY_API_KEY` 非空时，普通模式会升级为 LangChain `create_agent`：
+### 1. 环境要求
 
-1. Agent 可调用 `web_search` 和 `calculator` 两个工具。
-2. 使用 `astream_events(version="v2")` 监听 `on_tool_start`、`on_tool_end` 与 `on_chat_model_stream`。
-3. 搜索开始时向前端发送 `status`，结束时提取网页标题和 URL 并合并到 `sources`。
-4. Agent 失败会自动回退到不调用工具的普通 LLM 流式链路。
+- Python 3.11+
+- Node.js 22+
+- MySQL 8.x
+- Redis 6.x+
 
-> 这里的“function calling”指由 LangChain Agent 编排的工具调用能力。是否实际触发工具由模型根据系统提示和用户问题决定。
+### 2. 安装依赖
 
-## 本地开发
-
-### 1. 准备依赖
-
-建议使用 Python 3.11 或更高版本，并已安装 MySQL、Redis。
-
-```bash
-git clone <你的 GitHub 仓库地址>
+```powershell
+git clone <你的仓库地址>
 cd ai-knowledge-qa
 
 python -m venv venv
-# Linux/macOS
-source venv/bin/activate
-# Windows PowerShell
-# .\venv\Scripts\Activate.ps1
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 
-pip install -r requirements.txt
+cd web
+npm install
+cd ..
 ```
 
-项目代码还使用 LangChain 的拆分包。若启动时提示缺少模块，可补充安装：
+Linux/macOS 使用 `source venv/bin/activate` 激活虚拟环境。
 
-```bash
-pip install langchain-chroma langchain-huggingface langchain-classic
+### 3. 配置环境变量
+
+复制 `.env.example` 为 `.env`，然后填写真实配置。不要提交 `.env`。
+
+```powershell
+Copy-Item .env.example .env
 ```
 
-### 2. 配置环境变量
+最小必填项：
 
-复制示例文件并填入真实凭据，切勿提交 `.env`：
-
-```bash
-cp .env.example .env
+```dotenv
+DEEPSEEK_API_KEY=sk-your-key
+MYSQL_USER=root
+MYSQL_PASSWORD=your-password
+MYSQL_DATABASE=ai_qa
+APP_ACCESS_TOKEN=请替换为足够长的随机值
+APP_USER_ID=default-user
 ```
 
-| 变量 | 必填 | 说明 |
+可以使用 Python 生成访问 token：
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+主要配置项：
+
+| 配置 | 默认值 | 说明 |
 | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 是 | DeepSeek API 密钥 |
-| `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` | 是 | MySQL 连接配置 |
-| `REDIS_HOST`、`REDIS_PORT`、`REDIS_DB`、`REDIS_PASSWORD` | 否 | Redis 连接配置，密码可留空 |
-| `TAVILY_API_KEY` | 否 | 配置后启用联网搜索工具 |
-| `API_URL` | 前端使用 | Gradio 服务访问 FastAPI 的地址，单机默认 `http://localhost:8000` |
-| `CHROMA_PERSIST_DIR`、`UPLOAD_DIR` | 否 | 向量库与上传文件的持久化目录 |
-| `LLM_MODEL`、`LLM_BASE_URL` | 否 | 覆盖默认 DeepSeek 模型和兼容 API 地址 |
+| `LLM_MODEL` | `deepseek-v4-flash` | DeepSeek 兼容模型名 |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容 API 地址 |
+| `TAVILY_API_KEY` | 空 | 留空时禁用联网搜索 |
+| `MYSQL_HOST` / `MYSQL_PORT` | `localhost` / `3306` | MySQL 地址 |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Web 会话与限流使用的 Redis 地址 |
+| `APP_WEB_SESSION_TTL_SECONDS` | `604800` | 本地 Web 登录会话有效期 |
+| `MAX_UPLOAD_BYTES` | `26214400` | 单个上传文件最大字节数，默认 25 MiB |
+| `CHAT_STAGE_TIMEOUT_SECONDS` | `30` | 检索总超时或流式阶段无进度超时 |
+| `CHAT_TURN_LEASE_SECONDS` | `90` | 问答执行租约时间 |
+| `CHAT_TURN_HEARTBEAT_SECONDS` | `30` | 问答租约续期周期；租约必须至少是它的 3 倍 |
+| `INDEX_JOB_POLL_SECONDS` | `5` | 索引补偿任务轮询周期 |
+| `INDEX_JOB_LEASE_SECONDS` | `120` | 单个索引任务租约时间 |
+| `INDEX_JOB_MAX_ATTEMPTS` | `10` | 自动索引最大尝试次数 |
+| `INDEX_JOB_RETRY_BASE_SECONDS` | `30` | 索引退避起始时间 |
+| `INDEX_JOB_RETRY_MAX_SECONDS` | `1800` | 索引退避上限 |
+| `SUMMARY_LLM_TIMEOUT_SECONDS` | `30` | 摘要模型超时 |
+| `SUMMARY_LLM_MAX_RETRIES` | `0` | 摘要模型 SDK 自动重试次数 |
+| `LLM_CONTEXT_MAX_CHARS` | `100000` | 注入模型的动态资料字符预算 |
+| `RAG_RELEVANCE_THRESHOLD` | `0.5` | 文档与笔记检索相关度阈值 |
+| `CHROMA_PERSIST_DIR` | `./data/chroma_db` | Chroma 持久化目录 |
+| `UPLOAD_DIR` | `./data/uploads` | 上传文件目录 |
 
-### 3. 初始化并启动
+这些超时、租约、批量和大小限制是单机部署的可调默认值。生产部署前应根据真实文件大小、索引耗时、失败率、任务积压和 LLM 成本重新校准。
 
-```bash
-python -m db.init_db
+### 4. 初始化或升级数据库
 
-# 终端一，后端 API
-uvicorn app.main:app --reload
-
-# 终端二，前端 UI
-python -m frontend.app
+```powershell
+python -m db.init_db --upgrade
+alembic current
 ```
 
-访问：
+`db.init_db` 会安全补齐结构并通过 Alembic 升级到最新 revision。对于没有 Alembic 版本记录的旧数据库，只有在现有结构通过完整性检查后才会接管；残缺数据库不会被错误标记为最新。
 
-- 前端：`http://127.0.0.1:7860`
+以下命令会清空所有业务数据，只能用于明确需要重建的开发环境：
+
+```powershell
+python -m db.init_db --drop
+```
+
+### 5. 启动项目
+
+Windows 可以直接双击 `start.bat`，或运行：
+
+```powershell
+.\start.bat
+```
+
+跨平台启动方式：
+
+```bash
+python launcher.py
+```
+
+启动器会同时管理 FastAPI 和 Vite，等待服务就绪后打开 `http://127.0.0.1:5173/app/`。它使用一次性 bootstrap token 换取 HttpOnly Cookie，长期 `APP_ACCESS_TOKEN` 不会写入浏览器 URL 或前端构建。
+
+也可以在两个终端中分别启动：
+
+```powershell
+# 终端一
+python -m app.main
+
+# 终端二
+cd web
+npm run dev
+```
+
+常用地址：
+
+- Web 工作区：`http://127.0.0.1:5173/app/`
 - 后端健康检查：`http://127.0.0.1:8000/`
+- OpenAPI 文档：`http://127.0.0.1:8000/docs`
 
-### 4. 测试
+执行 `npm run build` 后，FastAPI 会在检测到 `web/dist` 时把生产前端挂载到 `/app`。
 
-```bash
-pytest
+## API 概览
+
+除 Web 登录接口外，业务 API 需要以下任一认证方式：
+
+- 服务端客户端：`Authorization: Bearer <APP_ACCESS_TOKEN>`
+- React Web：本机登录流程签发的 HttpOnly Cookie
+
+所有业务资源还会校验请求中的 `user_id` 是否等于服务端固定的 `APP_USER_ID`。
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `POST /api/v1/sessions` | 创建会话 |
+| `GET /api/v1/sessions` | 分页列出会话 |
+| `DELETE /api/v1/sessions/{session_id}` | 删除会话及关联数据 |
+| `POST /api/v1/documents` | 上传并索引文档 |
+| `GET /api/v1/documents` | 分页列出文档与索引状态 |
+| `DELETE /api/v1/documents/{document_id}` | 提交文档删除任务 |
+| `POST /api/v1/notes` | 创建笔记 |
+| `GET /api/v1/notes` | 分页读取完整笔记 |
+| `GET /api/v1/notes/summaries` | 分页读取笔记摘要 |
+| `GET /api/v1/notes/{note_id}` | 读取单篇笔记 |
+| `PUT /api/v1/notes/{note_id}` | 按版本更新笔记 |
+| `DELETE /api/v1/notes/{note_id}` | 提交笔记删除任务 |
+| `POST /api/v1/chat` | normal/deep SSE 流式问答 |
+| `GET /api/v1/chat/turn` | 查询幂等问答状态或获取完成结果 |
+| `GET /api/v1/chat/history` | 分页读取已持久化消息 |
+
+列表接口统一支持 `limit` 和 `offset`，其中 `limit` 范围为 1～100。
+
+Chat SSE 事件包括：
+
+- `status`：deep 模式阶段状态或工具状态
+- `token`：回答增量文本
+- `sources`：规范化后的来源列表
+- `done`：本轮完成
+- `error`：本轮失败
+
+## 测试与质量检查
+
+后端：
+
+```powershell
+python -m pytest -q
+python -m pip check
+python -m compileall -q app agents db evaluation indexing memory migrations rag tools tests
+python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 ```
 
-## Linux 云服务器部署
+离线评测使用 `deterministic-char-bigram-v1` 确定性字符 bigram 检索器，仅验证公开小样本、指标实现和 CI 可复现性，不替代线上 BGE 向量检索，也不代表生产数据分布。
 
-以下是单台 Ubuntu/Debian 服务器的 HTTP 部署参考。没有域名时可通过公网 IP 访问，适合测试或演示。公网 HTTP 不会加密传输，请勿在不受信任网络上传输敏感内容。
+前端：
 
-### 1. 安装基础服务
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip mysql-server redis-server nginx
-
-sudo systemctl enable --now mysql redis-server nginx
+```powershell
+cd web
+npm test -- --run
+npm run lint
+npm run build
 ```
 
-将项目放到服务器，例如 `/opt/ai-knowledge-qa`，然后以专用账户运行：
+当前修复分支最近一次本地回归结果：
 
-```bash
-sudo useradd --system --create-home --shell /usr/sbin/nologin aiqa
-sudo mkdir -p /opt/ai-knowledge-qa
-sudo chown -R aiqa:aiqa /opt/ai-knowledge-qa
+| 检查 | 结果 |
+| --- | --- |
+| pytest | 223 passed |
+| Vitest | 60 passed |
+| TypeScript + Vite 生产构建 | 通过 |
+| Python compileall | 通过 |
+| pip check | No broken requirements found |
 
-sudo -u aiqa git clone <你的 GitHub 仓库地址> /opt/ai-knowledge-qa
-cd /opt/ai-knowledge-qa
-sudo -u aiqa python3 -m venv venv
-sudo -u aiqa venv/bin/pip install -r requirements.txt
-sudo -u aiqa venv/bin/pip install langchain-chroma langchain-huggingface langchain-classic
+需要运行中的 MySQL、Redis、后端和有效 LLM 配置时，可以执行：
+
+```powershell
+cd web
+npm run test:e2e:chat
+npm run test:e2e:documents
 ```
 
-创建 `/opt/ai-knowledge-qa/.env`，填入生产数据库、Redis 与 DeepSeek 配置。为 `data/chroma_db` 和 `data/uploads` 保留稳定的磁盘空间，并将其纳入备份。
+GitHub Actions 会在 push、pull request 和手动触发时：
 
-初始化数据库：
+1. 安装固定版本的 Python 依赖并执行 `pip check`；
+2. 启动 MySQL 8.4 service，执行数据库升级并确认 Alembic revision；
+3. 编译 Python 源码、运行全部 pytest 和离线 RAG 基线；
+4. 使用 `npm ci` 安装前端依赖，运行 Vitest 和生产构建。
 
-```bash
-cd /opt/ai-knowledge-qa
-sudo -u aiqa venv/bin/python -m db.init_db
-```
+CI 不调用付费 LLM，也不需要真实 API 密钥。Redis 和浏览器 E2E 不在常规 CI 中启动。
 
-### 2. 使用 systemd 管理后端和前端
+## 可观测性与隐私
 
-创建 `/etc/systemd/system/aiqa-api.service`：
+每个 HTTP 请求返回 `X-Request-ID`，Chat 使用独立 `turn_id` 串联执行过程。主要结构化事件包括：
 
-```ini
-[Unit]
-Description=AI Knowledge QA FastAPI
-After=network.target mysql.service redis-server.service
+- `request_completed`
+- `turn_started`
+- `turn_retrieval_completed`
+- `turn_first_token`
+- `turn_completed`
+- `turn_failed`
+- `turn_cancelled`
+- `turn_stage_failed`
 
-[Service]
-User=aiqa
-Group=aiqa
-WorkingDirectory=/opt/ai-knowledge-qa
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/ai-knowledge-qa/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
-Restart=on-failure
-RestartSec=5
+日志只应记录关联 ID、路由模板、状态码、模式、阶段、数量、耗时和错误类型。日志辅助函数会拒绝 `content`、`question`、`prompt`、`token`、`authorization` 等敏感字段名。
 
-[Install]
-WantedBy=multi-user.target
-```
-
-创建 `/etc/systemd/system/aiqa-web.service`：
-
-```ini
-[Unit]
-Description=AI Knowledge QA Gradio
-After=network.target aiqa-api.service
-Requires=aiqa-api.service
-
-[Service]
-User=aiqa
-Group=aiqa
-WorkingDirectory=/opt/ai-knowledge-qa
-Environment=PYTHONUNBUFFERED=1
-Environment=API_URL=http://127.0.0.1:8000
-ExecStart=/opt/ai-knowledge-qa/venv/bin/python -m frontend.app
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启用服务：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now aiqa-api aiqa-web
-sudo systemctl status aiqa-api aiqa-web
-```
-
-### 3. 使用 Nginx 通过公网 IP 访问
-
-创建 `/etc/nginx/sites-available/aiqa`：
-
-```nginx
-server {
-    listen 80 default_server;
-    server_name _;
-
-    client_max_body_size 50m;
-
-    location / {
-        proxy_pass http://127.0.0.1:7860;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 300s;
-        proxy_buffering off;
-    }
-}
-```
-
-启用配置并仅开放必要端口：
-
-```bash
-sudo ln -s /etc/nginx/sites-available/aiqa /etc/nginx/sites-enabled/aiqa
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl reload nginx
-
-sudo ufw allow OpenSSH
-sudo ufw allow 80/tcp
-sudo ufw enable
-```
-
-浏览器访问 `http://<服务器公网IP>/`。不要对外开放 `8000` 和 `7860` 端口，FastAPI 已绑定到回环地址，Gradio 端口则应由防火墙限制，仅由 Nginx 转发。
-
-查看运行日志：
-
-```bash
-journalctl -u aiqa-api -u aiqa-web -f
-```
-
-## 可选 DNS 与 HTTPS
-
-没有域名时不能为裸 IP 正常签发 Let's Encrypt 证书，因此应继续使用上面的 HTTP 测试方案，或仅在可信内网访问。
-
-当你购买或已有域名后：
-
-1. 在域名服务商的 DNS 控制台新增一条 **A 记录**，例如 `qa.example.com` 指向服务器公网 IP。
-2. 等待解析生效，并确认服务器防火墙和云厂商安全组允许 TCP `80`、`443`。
-3. 将 Nginx 的 `server_name _;` 改为 `server_name qa.example.com;`。
-4. 安装 Certbot 并签发证书：
-
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d qa.example.com
-sudo systemctl status certbot.timer
-```
-
-Certbot 会配置证书、HTTP 到 HTTPS 跳转及自动续期。完成后使用 `https://qa.example.com/` 访问服务。
-
-## 当前限制与安全建议
-
-- 前端使用固定 `default-user`，API 的 `user_id` 由客户端传入，不能视为严格的多用户隔离。
-- 文档、笔记、Chroma 数据与 MySQL 均应定期备份。
-- `.env` 包含 API 密钥与数据库密码，只能保存在服务器，权限建议设为 `chmod 600 .env`。
-- HTTPS 只能在拥有可解析域名后启用。没有 HTTPS 时避免在公网处理敏感文档或凭据。
-- 上线前应补充身份认证、授权校验、上传文件安全扫描、限流、日志脱敏、监控与备份恢复演练。
-
-## 项目目录
+## 项目结构
 
 ```text
-app/        FastAPI 路由、Pydantic Schema、错误处理与流式工具
-agents/     LangGraph 深度研究工作流
-rag/        文档加载、切分、向量库、检索与 LLM 封装
-memory/     Redis 短期记忆、MySQL 情景记忆、语义记忆
-db/         SQLAlchemy 模型、数据库连接与初始化脚本
-tools/      联网搜索与计算器工具
-frontend/   Gradio 用户界面
-tests/      自动化测试
+agents/       LangGraph 拆题、检索和整合工作流
+app/          FastAPI 路由、认证、SSE、错误处理和可观测性
+db/           SQLAlchemy 模型、数据库连接、结构检查和初始化入口
+migrations/   Alembic 可逆迁移脚本
+indexing/     MySQL 持久化索引任务、租约、重试和补偿执行器
+memory/       会话摘要、情景记忆、语义笔记和统一上下文检索
+rag/          文档加载、分块、向量库、上下文预算和 LLM 封装
+tools/        隔离的联网规划和 Tavily 结构化搜索
+evaluation/   公开小样本、离线评测 CLI 和基线结果
+tests/        后端自动化测试
+web/          React 工作区、组件测试和浏览器 E2E 脚本
 ```
+
+## 当前边界
+
+- 当前采用固定 `APP_USER_ID`，没有注册、密码、角色、刷新 token 或完整多租户认证与隔离。
+- Chroma 的用户隔离依赖 metadata filter，不是物理分库；MySQL 回查负责最终权威校验。
+- Redis 不可用时 React Web 登录会失败，但 MySQL 中的会话、消息和摘要不会丢失。
+- 尚未实现恶意文件扫描、内容沙箱、生产级指标后端、告警、自动备份恢复演练和容量验证。
+- FastAPI 与 Vite 默认只监听 `127.0.0.1`。公网部署前必须增加 HTTPS、正式身份认证、限流、网络访问控制和独立的生产进程管理。
+- 离线 RAG 基线验证的是确定性公开小样本与指标实现，不等同于真实数据分布下的线上 LLM 质量。
+
+## 数据库迁移与恢复原则
+
+- MySQL 是权威事实来源；Chroma、摘要和索引任务状态都可以根据权威记录恢复或重建。
+- 升级前应备份 MySQL 和上传目录，先停止写入服务，再执行 `python -m db.init_db --upgrade`。
+- 不要通过手工修改 `alembic_version` 跳过结构检查。
+- 不要把 `python -m db.init_db --drop` 用于包含有效数据的环境。

@@ -1,4 +1,9 @@
 """Agent 工作流测试：graph 结构 + state 定义 + 子问题解析"""
+import logging
+
+import pytest
+from types import SimpleNamespace
+
 from agents.state import ResearchState, RetrievedDoc, RetrievedNote
 from agents.graph import build_graph
 
@@ -91,3 +96,67 @@ def _collect_edges(graph):
                     edges.add((src, d))
 
     return edges
+
+
+def test_decomposer_accepts_validated_json_object(monkeypatch):
+    from agents import decomposer
+
+    class FakeLlm:
+        def bind(self, **kwargs):
+            assert kwargs["response_format"] == {"type": "json_object"}
+            return self
+
+        def invoke(self, prompt):
+            return SimpleNamespace(content='{"sub_questions":["问题一是什么","问题二如何做","问题三有何风险"]}')
+
+    monkeypatch.setattr(decomposer, "get_llm", lambda **kwargs: FakeLlm())
+
+    result = decomposer.agent_a_decompose({"original_question": "原始问题"})
+
+    assert result["sub_questions"] == ["问题一是什么", "问题二如何做", "问题三有何风险"]
+
+
+@pytest.mark.parametrize("content", ["not json", '{"sub_questions":[1]}', ""])
+def test_decomposer_invalid_output_falls_back_to_original_question(monkeypatch, content):
+    from agents import decomposer
+
+    class FakeLlm:
+        def bind(self, **kwargs):
+            return self
+
+        def invoke(self, prompt):
+            return SimpleNamespace(content=content)
+
+    monkeypatch.setattr(decomposer, "get_llm", lambda **kwargs: FakeLlm())
+
+    assert decomposer.agent_a_decompose({"original_question": "原始问题"}) == {
+        "sub_questions": ["原始问题"]
+    }
+
+
+def test_summarizer_failure_propagates_sanitized_error(monkeypatch, caplog):
+    """Agent C 失败时向图传播模糊异常，不把半截回答当作成功结果。"""
+    import langgraph.config
+    from agents import summarizer
+
+    secret_detail = "upstream-response-must-not-leak"
+
+    class BrokenLlm:
+        def stream(self, prompt):
+            raise RuntimeError(secret_detail)
+
+    monkeypatch.setattr(summarizer, "get_llm", lambda **kwargs: BrokenLlm())
+    monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: lambda event: None)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(RuntimeError, match="Agent C LLM 调用失败") as exc_info:
+        summarizer.agent_c_summarize({
+            "original_question": "公开测试问题",
+            "retrieved_docs": [],
+            "notes": [],
+            "episodic_memory": [],
+            "short_term_memory": "",
+        })
+
+    assert secret_detail not in str(exc_info.value)
+    assert secret_detail not in caplog.text
