@@ -99,7 +99,7 @@ if MAX_UPLOAD_BYTES <= 0:
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 
 # --- LLM ---
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
 SUMMARY_LLM_TIMEOUT_SECONDS = _positive_int_env("SUMMARY_LLM_TIMEOUT_SECONDS", "30")
 SUMMARY_LLM_MAX_RETRIES = _non_negative_int_env("SUMMARY_LLM_MAX_RETRIES", "0")

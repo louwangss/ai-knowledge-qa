@@ -12,6 +12,25 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def test_llm_config_defaults_to_supported_deepseek_model():
+    env = os.environ.copy()
+    env.pop("LLM_MODEL", None)
+    env["PYTHONUTF8"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import config; print(config.LLM_MODEL)"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "deepseek-v4-flash"
+
+
 def test_summary_llm_config_has_bounded_defaults():
     env = os.environ.copy()
     env.pop("SUMMARY_LLM_TIMEOUT_SECONDS", None)

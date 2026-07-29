@@ -100,6 +100,7 @@ cp .env.example .env
 | 变量 | 必填 | 用途 |
 | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | 是 | LLM API 凭据 |
+| `LLM_MODEL` / `LLM_BASE_URL` | 否 | 默认使用 `deepseek-v4-flash` 与 DeepSeek 兼容 API；可显式覆盖为其他兼容模型和地址 |
 | `MYSQL_*` | 是 | MySQL 连接配置 |
 | `APP_ACCESS_TOKEN` | 是 | 服务端 API 的 Bearer token，也可在本机手动换取 Web 会话；应使用足够长的随机值 |
 | `APP_USER_ID` | 是 | 服务端允许访问的固定单用户 ID |
