@@ -1,18 +1,17 @@
 """语义记忆：MySQL source of truth + Chroma 索引层"""
 import logging
 from datetime import datetime
-from collections import defaultdict
-from threading import Lock
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import SemanticMemory
+from db.models import IndexJob, SemanticMemory
 from app.note_version import build_note_version
+from indexing.jobs import enqueue_index_job
 
 logger = logging.getLogger(__name__)
 
 _SIMILARITY_DISTANCE_THRESHOLD = 0.15  # 余弦距离 <= 此值认为重复
-_NOTE_SYNC_LOCKS: defaultdict[int, Lock] = defaultdict(Lock)
 
 
 class NoteVersionConflictError(Exception):
@@ -67,8 +66,14 @@ def create_note(
         content=content,
         # 空字符串表示空白草稿无需向量，NULL 表示等待后台同步。
         chroma_id="" if not content.strip() else None,
+        index_version=1,
+        indexed_version=1 if not content.strip() else 0,
+        index_state="ready" if not content.strip() else "pending",
     )
     db.add(note)
+    db.flush()
+    if content.strip():
+        enqueue_index_job(db, "note", str(note.id), "upsert", note.index_version)
     db.commit()
     db.refresh(note)
     return note
@@ -105,28 +110,28 @@ def update_note(
     if content is not None:
         note.content = content
     note.updated_at = datetime.utcnow()
-    # MySQL 是权威数据源；NULL 标记后台需要重建派生向量。
-    note.chroma_id = None
+    note.index_version = (note.index_version or 0) + 1
+    note.index_state = "pending"
+    enqueue_index_job(db, "note", str(note.id), "upsert", note.index_version)
     db.commit()
     db.refresh(note)
     return note
 
 
 def delete_note(db: Session, note_id: int, user_id: str) -> bool:
-    """同步清理派生向量后删除 MySQL 权威记录。"""
-    with _NOTE_SYNC_LOCKS[note_id]:
-        note = db.query(SemanticMemory).filter(
-            SemanticMemory.id == note_id,
-            SemanticMemory.user_id == user_id,
-        ).first()
-        if not note:
-            return False
+    """原子标记删除并写入持久化任务，不在请求事务中访问 Chroma。"""
+    note = db.query(SemanticMemory).filter(
+        SemanticMemory.id == note_id,
+        SemanticMemory.user_id == user_id,
+        SemanticMemory.index_state != "deleting",
+    ).first()
+    if not note:
+        return False
 
-        # 清理失败时保留 MySQL 记录，避免留下仍可被检索的孤立向量。
-        _delete_note_vectors(note.id)
-
-        db.delete(note)
-        db.commit()
+    note.index_version = (note.index_version or 0) + 1
+    note.index_state = "deleting"
+    enqueue_index_job(db, "note", str(note.id), "delete", note.index_version)
+    db.commit()
     return True
 
 
@@ -134,6 +139,7 @@ def get_notes(db: Session, user_id: str) -> list[SemanticMemory]:
     """获取用户所有笔记"""
     return db.query(SemanticMemory).filter(
         SemanticMemory.user_id == user_id,
+        SemanticMemory.index_state != "deleting",
     ).order_by(SemanticMemory.created_at.desc()).all()
 
 
@@ -145,6 +151,7 @@ def get_note_summaries(db: Session, user_id: str):
         SemanticMemory.updated_at,
     ).filter(
         SemanticMemory.user_id == user_id,
+        SemanticMemory.index_state != "deleting",
     ).order_by(SemanticMemory.created_at.desc()).all()
 
 
@@ -153,10 +160,11 @@ def get_note(db: Session, note_id: int, user_id: str) -> SemanticMemory | None:
     return db.query(SemanticMemory).filter(
         SemanticMemory.id == note_id,
         SemanticMemory.user_id == user_id,
+        SemanticMemory.index_state != "deleting",
     ).first()
 
 
-def _sync_to_chroma(db: Session, note: SemanticMemory):
+def _sync_to_chroma(db: Session, note: SemanticMemory, index_version: int):
     """用稳定 ID 覆盖当前向量，并清理旧版或失败遗留的向量。"""
     vs = get_semantic_vector_store()
     existing = vs.get(where={"mysql_id": str(note.id)})
@@ -166,7 +174,8 @@ def _sync_to_chroma(db: Session, note: SemanticMemory):
         if existing_ids:
             vs.delete(ids=existing_ids)
         note.chroma_id = ""
-        db.commit()
+        note.indexed_version = index_version
+        note.index_state = "ready"
         return
 
     stable_id = f"semantic-note-{note.id}"
@@ -179,6 +188,7 @@ def _sync_to_chroma(db: Session, note: SemanticMemory):
             "concept": note.concept or "",
             "created_at": note.created_at.isoformat() if note.created_at else "",
             "updated_at": note.updated_at.isoformat() if note.updated_at else "",
+            "index_version": index_version,
         }],
         ids=[stable_id],
     )
@@ -186,7 +196,8 @@ def _sync_to_chroma(db: Session, note: SemanticMemory):
     if legacy_ids:
         vs.delete(ids=legacy_ids)
     note.chroma_id = stable_id
-    db.commit()
+    note.indexed_version = index_version
+    note.index_state = "ready"
 
 
 def _delete_note_vectors(note_id: int) -> None:
@@ -196,46 +207,50 @@ def _delete_note_vectors(note_id: int) -> None:
     delete_semantic_vectors_by_mysql_id(str(note_id))
 
 
-def sync_note_index_task(note_id: int, user_id: str) -> None:
-    """后台按笔记串行读取最新 MySQL 内容并同步派生向量。"""
-    from db.database import SessionLocal
+def process_note_index_job(db: Session, job: IndexJob) -> None:
+    """执行持久化笔记任务；仅当前期望版本可以改变实体状态。"""
+    note = db.get(SemanticMemory, int(job.entity_id))
+    if note is None or note.index_version != job.desired_version:
+        return
+    if job.operation == "delete":
+        _delete_note_vectors(note.id)
+        db.delete(note)
+        return
+    if job.operation != "upsert":
+        raise ValueError(f"不支持的笔记索引操作: {job.operation}")
 
-    with _NOTE_SYNC_LOCKS[note_id]:
-        db = SessionLocal()
-        try:
-            note = db.query(SemanticMemory).filter(
-                SemanticMemory.id == note_id,
-                SemanticMemory.user_id == user_id,
-            ).first()
-            if note is not None:
-                _sync_to_chroma(db, note)
-        except Exception as e:
-            db.rollback()
-            logger.error(
-                "笔记向量后台同步失败: note_id=%s error_type=%s",
-                note_id,
-                type(e).__name__,
+    note.index_state = "indexing"
+    db.commit()
+    note = db.get(SemanticMemory, int(job.entity_id))
+    if note is not None and note.index_version == job.desired_version:
+        _sync_to_chroma(db, note, job.desired_version)
+
+
+def sync_note_index_task(note_id: int, user_id: str) -> None:
+    """兼容 FastAPI 后台触发点：执行该笔记最新的未完成持久化任务。"""
+    from db.database import SessionLocal
+    from indexing.jobs import run_index_job
+
+    db = SessionLocal()
+    try:
+        job_id = db.scalar(
+            select(IndexJob.id)
+            .where(
+                IndexJob.entity_type == "note",
+                IndexJob.entity_id == str(note_id),
+                IndexJob.status.in_(("pending", "failed")),
             )
-        finally:
-            db.close()
+            .order_by(IndexJob.desired_version.desc())
+            .limit(1)
+        )
+        if job_id is not None:
+            run_index_job(db, job_id)
+    finally:
+        db.close()
 
 
 def compensation_task(db: Session):
-    """后台补偿：扫描 chroma_id IS NULL 的笔记，补写到 Chroma"""
-    notes = db.query(SemanticMemory).filter(
-        SemanticMemory.chroma_id.is_(None),
-    ).all()
-    synced_count = 0
-    for note in notes:
-        try:
-            _sync_to_chroma(db, note)
-            synced_count += 1
-        except Exception as e:
-            db.rollback()
-            logger.warning(
-                "补偿单条笔记失败: note_id=%s error_type=%s",
-                note.id,
-                type(e).__name__,
-            )
-    if notes:
-        logger.info("补偿任务完成: 成功同步 %s/%s 条笔记", synced_count, len(notes))
+    """兼容旧调用方；实际补偿统一由持久化任务扫描器完成。"""
+    from indexing.jobs import process_pending_index_jobs
+
+    return process_pending_index_jobs()

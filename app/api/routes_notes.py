@@ -93,10 +93,16 @@ def update_note_endpoint(
     return note
 
 
-@router.delete("/{note_id}")
-def delete_note_endpoint(note_id: int, user_id: str = Query(...), db: Session = Depends(get_db)):
+@router.delete("/{note_id}", status_code=202)
+def delete_note_endpoint(
+    note_id: int,
+    background_tasks: BackgroundTasks,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db),
+):
     require_app_user(user_id)
     success = delete_note(db, note_id, user_id)
     if not success:
         raise HTTPException(status_code=404, detail="笔记不存在")
-    return {"detail": "删除成功"}
+    background_tasks.add_task(sync_note_index_task, note_id, user_id)
+    return {"detail": "删除任务已提交"}

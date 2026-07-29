@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import BigInteger, create_engine
+from sqlalchemy import BigInteger, create_engine, select
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.models.schemas import NoteCreate, NoteUpdate
 from db.database import Base
-from db.models import SemanticMemory, User
+from db.models import IndexJob, SemanticMemory, User
 from memory import semantic
 
 
@@ -62,6 +62,21 @@ def test_create_note_only_writes_mysql(db_session):
     assert note.id is not None
     assert note.content == ""
     assert note.chroma_id == ""
+    assert note.index_state == "ready"
+    assert db_session.scalars(select(IndexJob)).all() == []
+
+
+def test_create_nonempty_note_atomically_enqueues_index_job(db_session):
+    note = semantic.create_note(db_session, "u1", "标题", "正文")
+
+    job = db_session.scalar(select(IndexJob).where(
+        IndexJob.entity_type == "note",
+        IndexJob.entity_id == str(note.id),
+    ))
+    assert note.index_state == "pending"
+    assert job is not None
+    assert job.operation == "upsert"
+    assert job.desired_version == note.index_version
 
 
 def test_update_note_marks_index_dirty_without_syncing_chroma(db_session):
@@ -89,7 +104,12 @@ def test_update_note_marks_index_dirty_without_syncing_chroma(db_session):
 
     assert updated.concept == "新标题"
     assert updated.content == "新内容"
-    assert updated.chroma_id is None
+    assert updated.index_version == 2
+    assert updated.index_state == "pending"
+    assert db_session.scalar(select(IndexJob).where(
+        IndexJob.entity_id == str(note.id),
+        IndexJob.desired_version == 2,
+    )) is not None
 
 
 def test_sync_to_chroma_uses_stable_id_and_removes_legacy_vectors(db_session):
@@ -119,12 +139,14 @@ def test_sync_to_chroma_uses_stable_id_and_removes_legacy_vectors(db_session):
 
     vector_store = FakeVectorStore()
     with patch.object(semantic, "get_semantic_vector_store", return_value=vector_store):
-        semantic._sync_to_chroma(db_session, note)
+        semantic._sync_to_chroma(db_session, note, index_version=1)
 
     stable_id = f"semantic-note-{note.id}"
     assert vector_store.added["ids"] == [stable_id]
     assert vector_store.deleted == ["legacy-vector-id"]
     assert note.chroma_id == stable_id
+    assert note.indexed_version == 1
+    assert note.index_state == "ready"
 
 
 def test_delete_semantic_vectors_does_not_load_embeddings(monkeypatch):
@@ -154,18 +176,22 @@ def test_delete_semantic_vectors_does_not_load_embeddings(monkeypatch):
     assert deleted == {"where": {"mysql_id": "42"}}
 
 
-def test_delete_note_keeps_mysql_record_when_vector_cleanup_fails(db_session):
+def test_delete_note_marks_deleting_and_enqueues_without_touching_chroma(db_session):
     note = semantic.create_note(db_session, "u1", "标题", "正文")
 
     with patch.object(
         semantic,
         "_delete_note_vectors",
-        side_effect=RuntimeError("Chroma unavailable"),
+        side_effect=AssertionError("请求事务不应同步访问 Chroma"),
     ):
-        with pytest.raises(RuntimeError, match="Chroma unavailable"):
-            semantic.delete_note(db_session, note.id, "u1")
+        assert semantic.delete_note(db_session, note.id, "u1") is True
 
-    assert db_session.get(SemanticMemory, note.id) is not None
+    persisted = db_session.get(SemanticMemory, note.id)
+    assert persisted.index_state == "deleting"
+    assert db_session.scalar(select(IndexJob).where(
+        IndexJob.entity_id == str(note.id),
+        IndexJob.operation == "delete",
+    )) is not None
 
 
 def test_note_api_rejects_stale_version_without_overwriting_content(db_session):
