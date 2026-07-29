@@ -57,7 +57,7 @@ def test_deterministic_retriever_ranks_relevant_document_first():
     retriever = DeterministicCharNgramRetriever(
         [
             {"source": "rag.md", "content": "检索增强生成先检索知识库文档再生成回答"},
-            {"source": "redis.md", "content": "Redis 保存带过期时间的短期记忆"},
+            {"source": "redis.md", "content": "Redis 保存带过期时间的 Web 登录会话"},
         ]
     )
 

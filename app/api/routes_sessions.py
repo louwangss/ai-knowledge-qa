@@ -17,7 +17,8 @@ from db.models import (
     SessionSummary,
     User,
 )
-from memory.short_term import delete_session_memory, get_redis
+from memory.redis_client import delete_legacy_conversation_keys
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
@@ -82,12 +83,12 @@ def delete_session(session_id: str, user_id: str = Query(...), db: Session = Dep
         db.rollback()
         raise
 
-    # Redis 是可重建派生状态；数据库删除成功后尽力清理，失败时由 TTL 最终回收。
+    # 兼容从旧 Redis 对话缓存版本升级后的硬删除语义；当前版本不再写入这些 key。
     try:
-        delete_session_memory(get_redis(), user_id, session_id)
+        delete_legacy_conversation_keys(user_id, session_id)
     except Exception as exc:
         logger.warning(
-            "会话已删除，但 Redis 短期记忆清理失败: error_type=%s",
+            "会话已删除，但旧 Redis 对话 key 清理失败: error_type=%s",
             type(exc).__name__,
         )
 

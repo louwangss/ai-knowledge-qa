@@ -129,31 +129,39 @@ def test_get_llm_only_passes_bounds_when_explicitly_configured():
     assert "max_retries" not in default_kwargs
 
 
-def test_generate_summary_uses_bounds_and_failure_keeps_old_summary_untouched(monkeypatch):
-    from memory import short_term
+def test_generate_summary_uses_configured_timeout_and_retry_bounds(monkeypatch):
+    from memory import conversation
 
     llm = MagicMock()
-    llm.invoke.side_effect = TimeoutError("summary timeout")
+    llm.invoke.return_value.content = "新的持久化摘要"
     get_llm = MagicMock(return_value=llm)
-    monkeypatch.setattr(short_term, "get_llm", get_llm)
-    monkeypatch.setattr(short_term, "SUMMARY_LLM_TIMEOUT_SECONDS", 12)
-    monkeypatch.setattr(short_term, "SUMMARY_LLM_MAX_RETRIES", 0)
+    monkeypatch.setattr(conversation, "get_llm", get_llm)
+    monkeypatch.setattr(conversation, "SUMMARY_LLM_TIMEOUT_SECONDS", 12)
+    monkeypatch.setattr(conversation, "SUMMARY_LLM_MAX_RETRIES", 0)
 
-    redis = MagicMock()
-    redis.get.return_value = "已经持久化的旧摘要"
-    redis.lrange.return_value = [
-        '{"role": "user", "content": "需要压缩的新消息"}'
-    ]
-    db_session = MagicMock()
-
-    short_term._do_compress(redis, "u1", "s1", db_session=db_session)
+    result = conversation._generate_summary(
+        "已有摘要",
+        [{"role": "user", "content": "需要压缩的新消息"}],
+    )
 
     get_llm.assert_called_once_with(
         temperature=0.0,
         timeout=12,
         max_retries=0,
     )
-    redis.set.assert_not_called()
-    redis.ltrim.assert_not_called()
-    db_session.add.assert_not_called()
-    db_session.commit.assert_not_called()
+    assert result.endswith("新的持久化摘要")
+
+
+def test_generate_summary_returns_empty_string_when_llm_fails(monkeypatch):
+    from memory import conversation
+
+    llm = MagicMock()
+    llm.invoke.side_effect = TimeoutError("summary timeout")
+    monkeypatch.setattr(conversation, "get_llm", lambda **_kwargs: llm)
+
+    result = conversation._generate_summary(
+        "已经持久化的旧摘要",
+        [{"role": "user", "content": "需要压缩的新消息"}],
+    )
+
+    assert result == ""

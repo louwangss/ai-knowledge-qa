@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "evaluated_at": "2026-07-28T17:38:05.121117Z",
+  "evaluated_at": "2026-07-29T11:28:49.989754Z",
   "dataset": {
     "id": "aiqa-public-mini-v1",
-    "version": "1.0.0",
-    "sha256": "8a9e036de5db6e3f599308738243a5f6b7dfbeace061a9987b5c285a29a7db5e",
+    "version": "1.1.0",
+    "sha256": "70110ab480bc518b5042caea3e2d2c55a6fdcb4d5b706401ce0d341eeba09a5d",
     "document_count": 4,
     "case_count": 4
   },
@@ -38,7 +38,7 @@
       ]
     },
     {
-      "id": "memory-restore",
+      "id": "memory-persistence",
       "expected_sources": [
         "memory_design.md"
       ],
@@ -47,8 +47,8 @@
         "security_boundary.md"
       ],
       "scores": [
-        0.346552,
-        0.038962
+        0.271607,
+        0.02008
       ],
       "retrieval_hit": true,
       "reference_citations": [

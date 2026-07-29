@@ -38,6 +38,20 @@ def test_gradio_runtime_is_fully_retired():
     assert "/api/v1/users" not in paths
 
 
+def test_legacy_redis_chat_memory_is_fully_retired():
+    """旧实现不得重新引入，Redis 不能再次成为对话事实来源。"""
+    assert not (PROJECT_ROOT / "memory" / "short_term.py").exists()
+
+    production_roots = ["app", "agents", "memory", "rag", "tools"]
+    legacy_imports = []
+    for root_name in production_roots:
+        for path in (PROJECT_ROOT / root_name).rglob("*.py"):
+            if "memory.short_term" in path.read_text(encoding="utf-8"):
+                legacy_imports.append(path.relative_to(PROJECT_ROOT).as_posix())
+
+    assert legacy_imports == []
+
+
 def test_readme_documents_security_and_evaluation_limits():
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 

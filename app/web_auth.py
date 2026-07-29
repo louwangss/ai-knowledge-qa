@@ -14,7 +14,7 @@ from config import (
     WEB_LOGIN_WINDOW_SECONDS,
     WEB_SESSION_TTL_SECONDS,
 )
-from memory.short_term import get_redis
+from memory.redis_client import get_redis
 
 
 WEB_SESSION_COOKIE = "ai_knowledge_web_session"

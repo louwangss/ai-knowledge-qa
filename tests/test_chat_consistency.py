@@ -21,79 +21,12 @@ from app.api import routes_chat
 from app.models.schemas import ChatMessage, ChatRequest
 from db.database import Base
 from db.models import ChatHistory, ChatSource, ChatTurn, Session as SessionModel, User
-from memory.short_term import _key, append_message, cleanup_failed_turn, get_messages
 
 
 @compiles(BigInteger, "sqlite")
 def _compile_big_integer_as_sqlite_integer(type_, compiler, **kwargs):
     """让 MySQL BIGINT 主键在 SQLite 回归测试中保留自增语义。"""
     return "INTEGER"
-
-
-class FakeRedis:
-    """覆盖短期记忆本次测试所需命令的内存 Redis。"""
-
-    def __init__(self):
-        self.values = {}
-        self.lists = {}
-
-    def pipeline(self):
-        return self
-
-    def execute(self):
-        return []
-
-    def get(self, key):
-        return self.values.get(key)
-
-    def set(self, key, value):
-        self.values[key] = str(value)
-        return True
-
-    def expire(self, key, ttl):
-        return True
-
-    def incr(self, key):
-        value = int(self.values.get(key, 0)) + 1
-        self.values[key] = str(value)
-        return value
-
-    def decr(self, key):
-        value = int(self.values.get(key, 0)) - 1
-        self.values[key] = str(value)
-        return value
-
-    def rpush(self, key, value):
-        self.lists.setdefault(key, []).append(value)
-        return len(self.lists[key])
-
-    def rpop(self, key):
-        values = self.lists.get(key, [])
-        return values.pop() if values else None
-
-    def lrange(self, key, start, end):
-        values = self.lists.get(key, [])
-        normalized_start = start if start >= 0 else max(len(values) + start, 0)
-        normalized_end = end if end >= 0 else len(values) + end
-        return values[normalized_start:normalized_end + 1]
-
-    def lrem(self, key, count, value):
-        values = self.lists.get(key, [])
-        for index, item in enumerate(values):
-            if item == value:
-                del values[index]
-                return 1
-        return 0
-
-    def ltrim(self, key, start, end):
-        self.lists[key] = self.lrange(key, start, end)
-        return True
-
-    def delete(self, key):
-        removed = int(key in self.values or key in self.lists)
-        self.values.pop(key, None)
-        self.lists.pop(key, None)
-        return removed
 
 
 @pytest.fixture
@@ -186,7 +119,6 @@ async def _consume_response(response, *, run_background=False):
 
 async def _collect_chat(
     db,
-    redis,
     record_event_side_effect=None,
     stream_factory=_stream_answer,
     message="本次问题",
@@ -226,10 +158,8 @@ async def _collect_chat(
 
 
 def test_completed_turn_persists_one_atomic_message_pair(db_session):
-    """一次成功生成只追加一对最终消息，Redis 不再承载权威写入。"""
-    redis = FakeRedis()
-
-    stream = asyncio.run(_collect_chat(db_session, redis))
+    """一次成功生成只追加一对最终消息。"""
+    stream = asyncio.run(_collect_chat(db_session))
 
     rows = db_session.execute(
         select(ChatHistory).where(ChatHistory.content.in_(["本次问题", "本次回答"]))
@@ -238,7 +168,6 @@ def test_completed_turn_persists_one_atomic_message_pair(db_session):
         ("user", "本次问题"),
         ("assistant", "本次回答"),
     ]
-    assert get_messages(redis, "u1", "s1") == []
     assert "event: done" in stream
 
 
@@ -274,10 +203,8 @@ def test_chat_request_rejects_non_uuid_turn_id():
 
 def test_completed_answer_survives_auxiliary_persistence_failure(db_session):
     """assistant 已提交后，情景记忆失败不应回滚完整问答。"""
-    redis = FakeRedis()
-
     stream = asyncio.run(
-        _collect_chat(db_session, redis, record_event_side_effect=RuntimeError("episodic failed"))
+        _collect_chat(db_session, record_event_side_effect=RuntimeError("episodic failed"))
     )
 
     rows = db_session.execute(
@@ -301,7 +228,6 @@ def test_completed_answer_survives_conversation_compression_failure(db_session):
     stream = asyncio.run(
         _collect_chat(
             db_session,
-            FakeRedis(),
             compression_side_effect=fail_compression,
         )
     )
@@ -454,7 +380,6 @@ def test_completed_answer_persists_mode_and_sources_for_history(db_session):
     stream = asyncio.run(
         _collect_chat(
             db_session,
-            FakeRedis(),
             stream_factory=_stream_answer_with_sources,
         )
     )
@@ -480,7 +405,6 @@ def test_deep_answer_persists_mode_and_sources(db_session):
     asyncio.run(
         _collect_chat(
             db_session,
-            FakeRedis(),
             stream_factory=_stream_answer_with_sources,
             mode="deep",
         )
@@ -501,7 +425,6 @@ def test_sources_are_normalized_once_for_stream_and_history(db_session):
     stream = asyncio.run(
         _collect_chat(
             db_session,
-            FakeRedis(),
             stream_factory=_stream_answer_with_untrusted_sources,
         )
     )
@@ -769,7 +692,6 @@ def test_failed_turn_can_be_reclaimed_without_leaving_half_history(db_session):
     failed_stream = asyncio.run(
         _collect_chat(
             db_session,
-            FakeRedis(),
             stream_factory=_stream_failure,
             message="失败后重试",
             client_turn_id=turn_id,
@@ -788,7 +710,6 @@ def test_failed_turn_can_be_reclaimed_without_leaving_half_history(db_session):
     completed_stream = asyncio.run(
         _collect_chat(
             db_session,
-            FakeRedis(),
             message="失败后重试",
             client_turn_id=turn_id,
         )
@@ -886,7 +807,6 @@ def test_persistence_failure_rolls_back_whole_turn_and_marks_failed(db_session):
         stream = asyncio.run(
             _collect_chat(
                 db_session,
-                FakeRedis(),
                 stream_factory=_stream_answer_with_sources,
                 message="事务失败问题",
                 client_turn_id=turn_id,
@@ -1042,7 +962,6 @@ def test_completed_turn_links_one_ordered_user_assistant_pair(db_session):
 
     stream = asyncio.run(_collect_chat(
         db_session,
-        FakeRedis(),
         message="成对写入问题",
         client_turn_id=turn_id,
     ))
@@ -1099,54 +1018,10 @@ def test_stream_deep_exposes_agent_b_retrieved_documents_as_sources(monkeypatch)
     ]} in events
 
 
-def test_cleanup_removes_exact_pending_message_instead_of_list_tail():
-    """并发追加后，清理只能删除指定 message_id 的 pending user 消息。"""
-    redis = FakeRedis()
-    append_message(redis, "u1", "s1", "user", "待回滚问题", message_id="pending-1")
-    append_message(redis, "u1", "s1", "user", "稍后到达的问题", message_id="pending-2")
-    redis.set(_key("u1", "s1", "round_count"), 2)
-
-    removed = cleanup_failed_turn(
-        redis,
-        "u1",
-        "s1",
-        message_id="pending-1",
-        content="待回滚问题",
-        decrement_round_count=True,
-    )
-
-    messages = get_messages(redis, "u1", "s1")
-    assert removed is True
-    assert [item["message_id"] for item in messages] == ["pending-2"]
-    assert redis.get(_key("u1", "s1", "round_count")) == "1"
-
-
-def test_cleanup_does_not_decrement_round_when_increment_never_succeeded():
-    """user 已缓存但 INCR 失败时，回滚不能减少既有轮数。"""
-    redis = FakeRedis()
-    append_message(redis, "u1", "s1", "user", "待回滚问题", message_id="pending-1")
-    redis.set(_key("u1", "s1", "round_count"), 3)
-
-    removed = cleanup_failed_turn(
-        redis,
-        "u1",
-        "s1",
-        message_id="pending-1",
-        content="待回滚问题",
-        decrement_round_count=False,
-    )
-
-    assert removed is True
-    assert get_messages(redis, "u1", "s1") == []
-    assert redis.get(_key("u1", "s1", "round_count")) == "3"
-
-
 def test_generation_failure_removes_pending_turn_and_does_not_leave_title(db_session):
     """回答生成失败时只保留历史，不留下当前消息或由它生成的标题。"""
-    redis = FakeRedis()
-
     stream = asyncio.run(
-        _collect_chat(db_session, redis, stream_factory=_stream_failure)
+        _collect_chat(db_session, stream_factory=_stream_failure)
     )
 
     rows = db_session.execute(
@@ -1156,7 +1031,6 @@ def test_generation_failure_removes_pending_turn_and_does_not_leave_title(db_ses
         ("user", "历史问题"),
         ("assistant", "历史回答"),
     ]
-    assert get_messages(redis, "u1", "s1") == []
     session = db_session.get(SessionModel, "s1")
     assert session.title is None
     assert "event: error" in stream
@@ -1168,7 +1042,6 @@ def test_empty_answer_is_failed_and_never_persisted(db_session):
 
     stream = asyncio.run(_collect_chat(
         db_session,
-        FakeRedis(),
         stream_factory=_stream_empty,
         client_turn_id=turn_id,
     ))
@@ -1197,7 +1070,6 @@ def test_retrieval_timeout_marks_turn_failed_without_half_history(db_session, mo
     monkeypatch.setattr(routes_chat, "CHAT_STAGE_TIMEOUT_SECONDS", 0.01)
     stream = asyncio.run(_collect_chat(
         db_session,
-        FakeRedis(),
         client_turn_id=turn_id,
         retrieve_factory=hanging_retrieval,
     ))
@@ -1222,7 +1094,7 @@ def test_chat_turn_logs_stage_timings_without_user_content(db_session, caplog):
     caplog.set_level(logging.INFO)
 
     stream = asyncio.run(
-        _collect_chat(db_session, FakeRedis(), message=secret_question)
+        _collect_chat(db_session, message=secret_question)
     )
 
     events = []

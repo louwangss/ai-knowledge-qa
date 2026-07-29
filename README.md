@@ -48,7 +48,7 @@ Bearer / HttpOnly 会话认证与资源归属校验
   -> sources + done
 ```
 
-生成未完成时只把 reservation 标为 failed，不写聊天事实；进程异常退出后，其他 worker 只能接管已过期租约，并且旧 owner 无权再提交结果。assistant 已持久化后，即使浏览器没收到 `done`，同一 turn ID 重试也会直接重放结果。React 重新打开会话时按 session ID 从 MySQL 加载历史，因此第二天启动或 Redis 旧缓存过期后仍可继续同一会话。
+生成未完成时只把 reservation 标为 failed，不写聊天事实；进程异常退出后，其他 worker 只能接管已过期租约，并且旧 owner 无权再提交结果。assistant 已持久化后，即使浏览器没收到 `done`，同一 turn ID 重试也会直接重放结果。React 重新打开会话时按 session ID 从 MySQL 加载历史，因此第二天启动或 Web 登录状态过期后，重新登录仍可继续同一会话。
 
 会话摘要是可重建的派生状态：后台摘要调用默认 30 秒超时、0 次 SDK 重试；失败时不会截断原始消息或推进压缩游标，下一次达到压缩条件时可继续尝试。
 
@@ -103,7 +103,7 @@ cp .env.example .env
 | `MYSQL_*` | 是 | MySQL 连接配置 |
 | `APP_ACCESS_TOKEN` | 是 | 服务端 API 的 Bearer token，也可在本机手动换取 Web 会话；应使用足够长的随机值 |
 | `APP_USER_ID` | 是 | 服务端允许访问的固定单用户 ID |
-| `REDIS_*` | 否 | Redis 连接配置，密码可留空；当前用于 Web 登录会话与登录限流，不保存权威对话记忆 |
+| `REDIS_*` | 否 | Redis 连接配置，密码可留空；当前用于 Web 登录会话、登录限流及定向清理升级前遗留 key，不保存权威对话记忆 |
 | `TAVILY_API_KEY` | 否 | 非空时允许 normal Agent 使用联网搜索 |
 | `API_HOST` | 否 | FastAPI 监听地址，默认 `127.0.0.1` |
 | `MAX_UPLOAD_BYTES` | 否 | 默认 25 MiB，是当前单机演示的可调整启发式值 |
@@ -221,7 +221,7 @@ python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 
 - Bearer token + 固定 `APP_USER_ID` 是单用户演示边界，不是注册、密码、角色、刷新 token 或完整多租户认证。
 - Web 会话只解决本机单用户演示的浏览器凭证隔离，不是完整多租户认证；公网部署前应增加 HTTPS、正式身份认证、限流和网络访问控制。
-- Redis 仍用于 React 的 HttpOnly 登录会话和登录限流；Redis 不可用时 Web 登录会返回 503，但 MySQL 中的会话、消息和摘要不会丢失，服务端 Bearer 客户端也不依赖 Redis 读取对话事实。
+- Redis 仍用于 React 的 HttpOnly 登录会话和登录限流；删除会话时还会尽力清理升级前遗留的固定对话 key，但不会读取或新写入这类数据。Redis 不可用时 Web 登录会返回 503，但 MySQL 中的会话、消息和摘要不会丢失，服务端 Bearer 客户端也不依赖 Redis 读取对话事实。
 - ChatTurn 使用数据库时钟、每次执行独立 owner、90 秒租约与 30 秒心跳；多 worker 启动时只回收无租约或已过期的 turn，旧 worker 受 fencing 约束不能覆盖新 owner。90/30 是结合当前 30 秒流式空闲超时设定的启发式默认值，并非容量结论；生产部署应根据事件循环阻塞、数据库延迟和故障恢复指标重新校准。
 - `CHAT_STAGE_TIMEOUT_SECONDS=30` 延续项目原有 direct 流式空闲边界，并统一用于检索、Agent 与 deep 阶段；这是可调启发式默认值，不是上游 SLA。2026-07-29 核对的 Python 官方文档说明超时会取消当前等待，但线程中的同步工作不能被强制终止；DeepSeek 官方文档也只承诺等待期间发送 keep-alive，不提供应用层推荐时限。参考 [Python asyncio timeouts](https://docs.python.org/3/library/asyncio-task.html#timeouts) 与 [DeepSeek FAQ](https://api-docs.deepseek.com/faq)。
 - FastAPI 与 Vite 默认只监听 `127.0.0.1`；不要直接把开发服务端口暴露到公网。

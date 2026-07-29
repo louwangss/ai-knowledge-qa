@@ -1,6 +1,6 @@
 {
   "dataset_id": "aiqa-public-mini-v1",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "为演示 AI 知识库问答系统而编写的公开合成小样本，不含用户文档或私有数据。",
   "documents": [
     {
@@ -9,7 +9,7 @@
     },
     {
       "source": "memory_design.md",
-      "content": "系统使用 Redis 保存带过期时间的短期对话记忆，使用 MySQL 保存权威会话历史和摘要。Redis 状态过期或不完整时，可以从 MySQL 恢复摘要与未压缩消息。"
+      "content": "系统使用 MySQL 持久化保存权威会话历史和摘要，React 重新打开会话时按会话 ID 从 MySQL 加载，因此第二天启动后仍能继续问答。Redis 只保存带过期时间的 Web 登录会话和登录限流状态，不承载对话事实。"
     },
     {
       "source": "deep_research.md",
@@ -28,10 +28,10 @@
       "reference_answer": "根据《rag_intro.md》，RAG 先检索相关文档片段，再把片段作为上下文交给大语言模型生成回答。"
     },
     {
-      "id": "memory-restore",
-      "question": "Redis 的短期记忆过期后从哪里恢复？",
+      "id": "memory-persistence",
+      "question": "第二天重新启动后，会话历史从哪里加载？",
       "expected_sources": ["memory_design.md"],
-      "reference_answer": "根据《memory_design.md》，Redis 过期后从 MySQL 中恢复摘要和未压缩消息。"
+      "reference_answer": "根据《memory_design.md》，会话历史和摘要持久化在 MySQL，重新打开会话时按会话 ID 从 MySQL 加载；Redis 不保存对话事实。"
     },
     {
       "id": "deep-stages",

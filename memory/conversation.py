@@ -6,8 +6,9 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from config import SUMMARY_LLM_MAX_RETRIES, SUMMARY_LLM_TIMEOUT_SECONDS
 from db.models import ChatHistory, Session as SessionModel, SessionSummary
-from memory.short_term import _generate_summary
+from rag.llm import get_llm
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,36 @@ def _valid_compressed_count(compressed_count: int, total_messages: int) -> bool:
         and compressed_count <= total_messages
         and compressed_count % MESSAGES_PER_COMPRESSION == 0
     )
+
+
+def _generate_summary(existing_summary: str, old_messages: list[dict]) -> str:
+    """调用有界的内部 LLM，将旧消息合并进持久化摘要。"""
+    llm = get_llm(
+        temperature=0.0,
+        timeout=SUMMARY_LLM_TIMEOUT_SECONDS,
+        max_retries=SUMMARY_LLM_MAX_RETRIES,
+    )
+
+    conversation = "\n".join(
+        f"{msg['role']}: {msg['content'][:200]}" for msg in old_messages
+    )
+
+    prompt = """请将以下对话内容合并为一个简洁的摘要（约 200~300 字）。
+请在摘要开头标注这段对话的大致时间范围。
+保留关键信息（讨论的主题、重要结论、涉及的文档或笔记），省略无关细节。
+思考步骤：先识别对话讨论了哪些主题，再提取每个主题的关键结论，最后组织成连贯的摘要。
+
+"""
+    if existing_summary:
+        prompt += f"已有摘要：\n{existing_summary}\n\n"
+    prompt += f"新对话内容：\n{conversation}\n\n请输出合并后的摘要："
+
+    try:
+        response = llm.invoke(prompt)
+        return f"[以下为早期对话的摘要，可能遗漏部分细节]\n{response.content}"
+    except Exception as exc:
+        logger.error("摘要 LLM 调用失败: error_type=%s", type(exc).__name__)
+        return ""
 
 
 def load_conversation_memory(db: Session, user_id: str, session_id: str) -> dict:

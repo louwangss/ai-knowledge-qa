@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -22,20 +23,6 @@ from db.models import (
     SessionSummary,
     User,
 )
-from memory.short_term import _key
-
-
-class FakeRedis:
-    def __init__(self):
-        self.values = {}
-
-    def delete(self, *keys):
-        removed = 0
-        for key in keys:
-            if key in self.values:
-                removed += 1
-                del self.values[key]
-        return removed
 
 
 @pytest.fixture
@@ -100,18 +87,15 @@ def db_session():
         engine.dispose()
 
 
-def test_delete_session_removes_summary_relations_and_redis_state(db_session, monkeypatch):
-    """删除会话应同时清除全部关联表和四类 Redis 状态。"""
-    redis = FakeRedis()
-    session_keys = [
-        _key("u1", "s1", suffix)
-        for suffix in ["summary", "messages", "round_count", "next_compress_round"]
-    ]
-    for key in session_keys:
-        redis.values[key] = "value"
-    redis.values["unrelated"] = "keep"
-    monkeypatch.setattr(routes_sessions, "get_redis", lambda: redis, raising=False)
+@pytest.fixture
+def legacy_redis_cleanup(monkeypatch):
+    cleanup = MagicMock()
+    monkeypatch.setattr(routes_sessions, "delete_legacy_conversation_keys", cleanup)
+    return cleanup
 
+
+def test_delete_session_removes_all_database_relations(db_session, legacy_redis_cleanup):
+    """删除会话应在同一数据库事务中清除全部关联表。"""
     response = routes_sessions.delete_session("s1", user_id="u1", db=db_session)
 
     assert response == {"detail": "删除成功"}
@@ -120,21 +104,20 @@ def test_delete_session_removes_summary_relations_and_redis_state(db_session, mo
     assert db_session.execute(select(EpisodicMemory)).scalars().all() == []
     assert db_session.execute(select(SessionSummary)).scalars().all() == []
     assert db_session.execute(select(ChatTurn)).scalars().all() == []
-    assert all(key not in redis.values for key in session_keys)
-    assert redis.values["unrelated"] == "keep"
+    legacy_redis_cleanup.assert_called_once_with("u1", "s1")
 
 
-def test_delete_session_removes_persisted_chat_sources(db_session, monkeypatch):
+def test_delete_session_removes_persisted_chat_sources(db_session, legacy_redis_cleanup):
     """删除会话时应先清除回答关联的结构化来源。"""
     chat_source_model = getattr(db_models, "ChatSource")
     db_session.add(chat_source_model(
+        id=1,
         message_id=1,
         source="架构说明.md",
         score=0.25,
         position=0,
     ))
     db_session.commit()
-    monkeypatch.setattr(routes_sessions, "get_redis", lambda: FakeRedis(), raising=False)
 
     routes_sessions.delete_session("s1", user_id="u1", db=db_session)
 
@@ -149,17 +132,28 @@ def test_chat_sources_lookup_index_is_declared():
     )
 
 
-def test_other_user_cannot_delete_session(db_session, monkeypatch):
+def test_other_user_cannot_delete_session(db_session, legacy_redis_cleanup):
     """非应用用户删除会话时返回 403 且不修改任何状态。"""
-    redis = FakeRedis()
-    monkeypatch.setattr(routes_sessions, "get_redis", lambda: redis, raising=False)
-
     with pytest.raises(HTTPException) as exc_info:
         routes_sessions.delete_session("s1", user_id="u2", db=db_session)
 
     assert exc_info.value.status_code == 403
     assert db_session.get(SessionModel, "s1") is not None
     assert db_session.execute(select(SessionSummary)).scalars().one().summary == "早期摘要"
+    legacy_redis_cleanup.assert_not_called()
+
+
+def test_legacy_redis_cleanup_failure_does_not_undo_database_delete(
+    db_session,
+    legacy_redis_cleanup,
+):
+    """历史派生 key 清理失败不能回滚已完成的权威数据库删除。"""
+    legacy_redis_cleanup.side_effect = RuntimeError("redis unavailable")
+
+    response = routes_sessions.delete_session("s1", user_id="u1", db=db_session)
+
+    assert response == {"detail": "删除成功"}
+    assert db_session.get(SessionModel, "s1") is None
 
 
 def test_other_user_cannot_read_session_history(db_session):

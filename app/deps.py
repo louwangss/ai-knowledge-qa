@@ -1,4 +1,4 @@
-"""依赖注入：认证、DB session、Redis 连接。"""
+"""依赖注入：认证与数据库会话。"""
 import secrets
 
 from fastapi import Depends, HTTPException, Request, status
