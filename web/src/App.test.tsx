@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -172,13 +172,24 @@ describe("笔记工作区", () => {
           last_active: "2026-07-28T10:00:00",
         }]);
       }
-      if (url.includes("/chat/history")) return jsonResponse([{
-        id: 1,
-        role: "user",
-        content: "RAG 是什么？",
-        mode: "normal",
-        created_at: "2026-07-28T10:00:00",
-      }]);
+      if (url.includes("/chat/history")) return jsonResponse([
+        {
+          id: 1,
+          role: "user",
+          content: "RAG 是什么？",
+          mode: "deep",
+          created_at: "2026-07-28T10:00:00",
+          sources: [],
+        },
+        {
+          id: 2,
+          role: "assistant",
+          content: "RAG 是检索增强生成。",
+          mode: "deep",
+          created_at: "2026-07-28T10:00:01",
+          sources: [{ source: "rag-guide.pdf", score: 0.82 }],
+        },
+      ]);
       if (url.includes("/summaries")) return jsonResponse([]);
       return jsonResponse({ detail: "ok" });
     });
@@ -188,6 +199,9 @@ describe("笔记工作区", () => {
 
     expect(await screen.findByText("RAG 是什么？")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /RAG 是什么/ })).toHaveAttribute("aria-current", "page");
+    const restoredAnswer = screen.getByLabelText("AI 回答");
+    expect(within(restoredAnswer).getByText("深度研究")).toBeInTheDocument();
+    expect(within(restoredAnswer).getByText("rag-guide.pdf")).toBeInTheDocument();
   });
 
   it("普通问答逐块显示回答并在完成后展示来源", async () => {
@@ -221,6 +235,7 @@ describe("笔记工作区", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "问答" }));
     const input = await screen.findByRole("textbox", { name: "输入问题" });
+    await waitFor(() => expect(input).toBeEnabled());
     fireEvent.change(input, { target: { value: "解释一下 RAG" } });
     fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
 
@@ -228,7 +243,9 @@ describe("笔记工作区", () => {
     expect(screen.getByText("rag.md")).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining("/chat"),
-      expect.objectContaining({ body: expect.stringContaining('"mode":"normal"') }),
+      expect.objectContaining({
+        body: expect.stringMatching(/"mode":"normal".*"client_turn_id":"[0-9a-f-]{36}"/),
+      }),
     );
   });
 

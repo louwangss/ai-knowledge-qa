@@ -6,14 +6,16 @@ import { MarkdownText } from "./MarkdownText";
 
 interface ChatPanelProps {
   messages: ChatDisplayMessage[];
-  hasSession: boolean;
+  sessionId: string | null;
   isLoading: boolean;
+  canRetryHistory?: boolean;
   isStreaming: boolean;
   isDeleting: boolean;
   onSend: (message: string, mode: ChatMode) => Promise<boolean>;
   onStop: () => void;
-  onDelete: () => Promise<boolean>;
+  onDelete: (sessionId: string) => Promise<boolean>;
   onCreate: () => void;
+  onRetryHistory?: () => void;
   onOpenSidebar: () => void;
 }
 
@@ -46,19 +48,22 @@ function Message({ message }: { message: ChatDisplayMessage }) {
 
 export function ChatPanel({
   messages,
-  hasSession,
+  sessionId,
   isLoading,
+  canRetryHistory = false,
   isStreaming,
   isDeleting,
   onSend,
   onStop,
   onDelete,
   onCreate,
+  onRetryHistory,
   onOpenSidebar,
 }: ChatPanelProps) {
+  const hasSession = Boolean(sessionId);
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState<ChatMode>("normal");
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -68,12 +73,12 @@ export function ChatPanel({
   }, [messages]);
 
   useEffect(() => {
-    if (confirmingDelete) cancelRef.current?.focus();
-  }, [confirmingDelete]);
+    if (deleteTargetId) cancelRef.current?.focus();
+  }, [deleteTargetId]);
 
   function submit() {
     const content = draft.trim();
-    if (!content || isStreaming) return;
+    if (!content || isLoading || canRetryHistory || isStreaming) return;
     setDraft("");
     void onSend(content, mode).then((accepted) => {
       if (!accepted) setDraft((current) => current || content);
@@ -89,14 +94,21 @@ export function ChatPanel({
           <button aria-pressed={mode === "deep"} onClick={() => setMode("deep")}><SparkIcon />深度研究</button>
         </div>
         {hasSession && (
-          <button className="icon-button delete-button" onClick={() => setConfirmingDelete(true)} disabled={isStreaming || isDeleting} aria-label="删除当前会话">
+          <button className="icon-button delete-button" onClick={() => setDeleteTargetId(sessionId)} disabled={isStreaming || isDeleting} aria-label="删除当前会话">
             <TrashIcon />
           </button>
         )}
       </header>
 
       <section className="chat-scroll" aria-label="对话内容">
-        {isLoading ? (
+        {canRetryHistory ? (
+          <div className="chat-empty" role="alert">
+            <div className="empty-symbol" aria-hidden="true">!</div>
+            <h1>会话记录暂时无法读取</h1>
+            <p>重新读取成功前不会发送新问题，避免覆盖服务端记录。</p>
+            <button className="empty-action" onClick={onRetryHistory}>重试读取</button>
+          </div>
+        ) : isLoading ? (
           <div className="chat-loading" aria-busy="true" aria-label="正在读取会话"><span /><span /><span /></div>
         ) : messages.length > 0 ? (
           <div className="message-list" role="log" aria-live="polite">
@@ -121,7 +133,7 @@ export function ChatPanel({
             value={draft}
             rows={1}
             placeholder={mode === "deep" ? "输入一个需要深入研究的问题…" : "询问你的知识库…"}
-            disabled={isStreaming}
+            disabled={isLoading || canRetryHistory || isStreaming}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
@@ -133,21 +145,21 @@ export function ChatPanel({
           {isStreaming ? (
             <button className="send-button stop" onClick={onStop} aria-label="停止回答"><StopIcon /></button>
           ) : (
-            <button className="send-button" onClick={submit} disabled={!draft.trim()} aria-label="发送问题"><SendIcon /></button>
+            <button className="send-button" onClick={submit} disabled={isLoading || canRetryHistory || !draft.trim()} aria-label="发送问题"><SendIcon /></button>
           )}
         </div>
         <div className="composer-hint">Enter 发送 · Shift Enter 换行 · AI 回答可能有误，请核对来源</div>
       </footer>
 
-      {confirmingDelete && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setConfirmingDelete(false)}>
+      {deleteTargetId && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setDeleteTargetId(null)}>
           <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-session-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="dialog-icon"><TrashIcon /></div>
             <h2 id="delete-session-title">删除这个会话？</h2>
             <p>该会话中的消息、摘要和短期记忆都会被删除，操作无法恢复。</p>
             <div className="dialog-actions">
-              <button ref={cancelRef} onClick={() => setConfirmingDelete(false)}>取消</button>
-              <button className="danger-action" disabled={isDeleting} onClick={() => void onDelete().then((deleted) => { if (deleted) setConfirmingDelete(false); })}>
+              <button ref={cancelRef} onClick={() => setDeleteTargetId(null)}>取消</button>
+              <button className="danger-action" disabled={isDeleting} onClick={() => void onDelete(deleteTargetId).then((deleted) => { if (deleted) setDeleteTargetId(null); })}>
                 {isDeleting ? "正在删除…" : "确认删除"}
               </button>
             </div>

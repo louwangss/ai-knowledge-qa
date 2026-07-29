@@ -30,6 +30,11 @@ export interface KnowledgeDocument {
 
 export type ChatMode = "normal" | "deep";
 
+export interface ChatTurnStatus {
+  client_turn_id: string;
+  status: "processing" | "completed" | "failed";
+}
+
 export interface SessionSummary {
   id: string;
   user_id: string;
@@ -45,6 +50,7 @@ export interface ChatHistoryMessage {
   content: string;
   mode: ChatMode | null;
   created_at: string;
+  sources?: ChatSource[] | null;
 }
 
 export interface ChatSource {
