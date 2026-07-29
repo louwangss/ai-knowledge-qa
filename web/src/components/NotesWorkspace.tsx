@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useNotesWorkspace } from "../useNotesWorkspace";
 import { Editor } from "./Editor";
@@ -14,7 +14,28 @@ interface NotesWorkspaceProps {
 export function NotesWorkspace({ userId, onChangeView, onLogout }: NotesWorkspaceProps) {
   const [search, setSearch] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isLeavingRef = useRef(false);
+  const pendingLeaveActionRef = useRef<(() => void) | null>(null);
   const workspace = useNotesWorkspace(userId);
+
+  const leaveAfterSaving = (action: () => void) => {
+    pendingLeaveActionRef.current = action;
+    if (isLeavingRef.current) return;
+    isLeavingRef.current = true;
+    void workspace.flushPendingSaves()
+      .then((saved) => {
+        const pendingAction = pendingLeaveActionRef.current;
+        pendingLeaveActionRef.current = null;
+        if (saved) pendingAction?.();
+      })
+      .finally(() => {
+        isLeavingRef.current = false;
+      });
+  };
+
+  const handleChangeView = (view: WorkspaceView) => {
+    leaveAfterSaving(() => onChangeView(view));
+  };
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -40,19 +61,19 @@ export function NotesWorkspace({ userId, onChangeView, onLogout }: NotesWorkspac
   }, [search, workspace.summaries]);
 
   return (
-    <div className="workspace">
+    <div className="workspace" aria-busy={workspace.isFlushing}>
       <Sidebar
         summaries={visibleSummaries}
         selectedId={workspace.selectedId}
         search={search}
         isOpen={sidebarOpen}
-        isCreating={workspace.isCreating}
+        isCreating={workspace.isCreating || workspace.isFlushing}
         onSearch={setSearch}
         onSelect={(id) => { workspace.selectNote(id); setSidebarOpen(false); }}
         onCreate={() => { void workspace.createNewNote(); setSidebarOpen(false); }}
         onClose={() => setSidebarOpen(false)}
-        onChangeView={onChangeView}
-        onLogout={onLogout}
+        onChangeView={handleChangeView}
+        onLogout={() => leaveAfterSaving(onLogout)}
       />
       <Editor
         note={workspace.activeNote}

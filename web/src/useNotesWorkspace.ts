@@ -20,10 +20,14 @@ export function useNotesWorkspace(userId: string | null) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [loadingId, setLoadingId] = useState<number | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [isFlushing, setIsFlushing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const notesRef = useRef<NoteCache>({});
   const timersRef = useRef(new Map<number, number>());
-  const inFlightRef = useRef(new Set<number>());
+  const savePromisesRef = useRef(new Map<number, Promise<void>>());
+  const createPromisesRef = useRef(new Map<number, Promise<void>>());
+  const flushPromiseRef = useRef<Promise<boolean> | null>(null);
+  const isFlushingRef = useRef(false);
   const pendingRef = useRef(new Set<number>());
   const tempIdRef = useRef(-1);
 
@@ -47,14 +51,18 @@ export function useNotesWorkspace(userId: string | null) {
 
   async function persist(noteId: number, force = false) {
     if (!userId || noteId < 0) return;
-    if (inFlightRef.current.has(noteId)) {
+    const currentOperation = savePromisesRef.current.get(noteId);
+    if (currentOperation) {
       pendingRef.current.add(noteId);
+      await currentOperation;
       return;
     }
     const snapshot = notesRef.current[noteId];
     if (!snapshot || (!force && snapshot.saveState !== "dirty" && snapshot.saveState !== "offline")) return;
 
-    inFlightRef.current.add(noteId);
+    let resolveOperation!: () => void;
+    const operation = new Promise<void>((resolve) => { resolveOperation = resolve; });
+    savePromisesRef.current.set(noteId, operation);
     updateCache((current) => current[noteId]
       ? { ...current, [noteId]: { ...current[noteId], saveState: "saving" } }
       : current);
@@ -80,11 +88,12 @@ export function useNotesWorkspace(userId: string | null) {
         ? { ...current, [noteId]: { ...current[noteId], saveState: isConflict ? "conflict" : "offline" } }
         : current);
     } finally {
-      inFlightRef.current.delete(noteId);
       const latest = notesRef.current[noteId];
       const needsAnotherSave = pendingRef.current.delete(noteId)
         || latest?.saveState === "dirty";
-      if (needsAnotherSave) scheduleSave(noteId);
+      if (needsAnotherSave && !isFlushingRef.current) scheduleSave(noteId);
+      savePromisesRef.current.delete(noteId);
+      resolveOperation();
     }
   }
 
@@ -139,12 +148,13 @@ export function useNotesWorkspace(userId: string | null) {
   }, []);
 
   const selectNote = useCallback((noteId: number) => {
+    if (isFlushingRef.current) return;
     setSelectedId(noteId);
     void loadNote(noteId);
   }, [loadNote]);
 
   const editSelected = useCallback((field: "concept" | "content", value: string) => {
-    if (selectedId === null) return;
+    if (selectedId === null || isFlushingRef.current) return;
     if (field === "content" && new TextEncoder().encode(value).length > 65_535) {
       setError("正文已达到 65,535 字节上限，请精简后继续输入。");
       return;
@@ -164,8 +174,16 @@ export function useNotesWorkspace(userId: string | null) {
 
   const createTemporaryOnServer = useCallback(async (tempId: number) => {
     if (!userId) return;
+    const currentOperation = createPromisesRef.current.get(tempId);
+    if (currentOperation) {
+      await currentOperation;
+      return;
+    }
     const pendingDraft = notesRef.current[tempId];
     if (!pendingDraft) return;
+    let resolveOperation!: () => void;
+    const operation = new Promise<void>((resolve) => { resolveOperation = resolve; });
+    createPromisesRef.current.set(tempId, operation);
     setIsCreating(true);
     setError(null);
     updateCache((current) => current[tempId]
@@ -196,11 +214,13 @@ export function useNotesWorkspace(userId: string | null) {
         : current);
     } finally {
       setIsCreating(false);
+      createPromisesRef.current.delete(tempId);
+      resolveOperation();
     }
   }, [scheduleSave, updateCache, userId]);
 
   const createNewNote = useCallback(async () => {
-    if (!userId || isCreating) return;
+    if (!userId || isCreating || isFlushingRef.current) return;
     const tempId = tempIdRef.current--;
     const now = new Date().toISOString();
     const optimistic: Note = {
@@ -220,7 +240,7 @@ export function useNotesWorkspace(userId: string | null) {
   }, [createTemporaryOnServer, isCreating, updateCache, userId]);
 
   const removeSelected = useCallback(async () => {
-    if (!userId || selectedId === null || selectedId < 0) return;
+    if (!userId || selectedId === null || selectedId < 0 || isFlushingRef.current) return;
     const removedId = selectedId;
     const previousSummaries = summaries;
     const previousCache = notesRef.current;
@@ -247,7 +267,7 @@ export function useNotesWorkspace(userId: string | null) {
   }, [loadNote, selectedId, summaries, updateCache, userId]);
 
   const loadServerVersion = useCallback(async () => {
-    if (!userId || selectedId === null || selectedId < 0) return;
+    if (!userId || selectedId === null || selectedId < 0 || isFlushingRef.current) return;
     try {
       const latest = await getNote(userId, selectedId);
       updateCache((current) => ({ ...current, [selectedId]: { ...latest, saveState: "saved" } }));
@@ -258,6 +278,74 @@ export function useNotesWorkspace(userId: string | null) {
       setError("服务器版本读取失败。");
     }
   }, [selectedId, updateCache, userId]);
+
+  function clearSaveTimers() {
+    timersRef.current.forEach((timer) => window.clearTimeout(timer));
+    timersRef.current.clear();
+  }
+
+  function showFlushFailure(note: Note) {
+    const title = note.concept?.trim() || "无标题笔记";
+    const reason = note.saveState === "conflict"
+      ? "存在版本冲突"
+      : note.id < 0
+        ? "尚未创建成功"
+        : "保存失败";
+    setSelectedId(note.id);
+    setError(`笔记《${title}》${reason}，请处理后再离开。`);
+  }
+
+  async function flushOnce(): Promise<boolean> {
+    const createOperations = [...createPromisesRef.current.values()];
+    if (createOperations.length > 0) await Promise.all(createOperations);
+    clearSaveTimers();
+
+    const noteIds = new Set<number>([
+      ...savePromisesRef.current.keys(),
+      ...Object.values(notesRef.current)
+        .filter((note) => note.id >= 0 && note.saveState && note.saveState !== "saved")
+        .map((note) => note.id),
+    ]);
+
+    await Promise.all([...noteIds].map(async (noteId) => {
+      const currentOperation = savePromisesRef.current.get(noteId);
+      if (currentOperation) await currentOperation;
+      const note = notesRef.current[noteId];
+      if (note?.saveState === "dirty" || note?.saveState === "offline") {
+        await persist(noteId);
+      }
+    }));
+    clearSaveTimers();
+
+    const failed = Object.values(notesRef.current).find(
+      (note) => note.saveState && note.saveState !== "saved",
+    );
+    if (failed) {
+      showFlushFailure(failed);
+      return false;
+    }
+    return true;
+  }
+
+  function flushPendingSaves(): Promise<boolean> {
+    const currentOperation = flushPromiseRef.current;
+    if (currentOperation) return currentOperation;
+
+    isFlushingRef.current = true;
+    setIsFlushing(true);
+    const operation = flushOnce()
+      .catch(() => {
+        setError("保存未完成，请处理后再离开。");
+        return false;
+      })
+      .finally(() => {
+        isFlushingRef.current = false;
+        setIsFlushing(false);
+        if (flushPromiseRef.current === operation) flushPromiseRef.current = null;
+      });
+    flushPromiseRef.current = operation;
+    return operation;
+  }
 
   const activeNote = selectedId === null ? null : notes[selectedId] ?? null;
   const hasUnsavedChanges = useMemo(
@@ -271,6 +359,7 @@ export function useNotesWorkspace(userId: string | null) {
     selectedId,
     isLoading: selectedId !== null && loadingId === selectedId && !activeNote,
     isCreating,
+    isFlushing,
     error,
     hasUnsavedChanges,
     selectNote,
@@ -278,17 +367,18 @@ export function useNotesWorkspace(userId: string | null) {
     createNewNote,
     removeSelected,
     retrySave: () => {
-      if (selectedId === null) return;
+      if (selectedId === null || isFlushingRef.current) return;
       if (selectedId < 0) {
         void createTemporaryOnServer(selectedId);
       } else {
         void persist(selectedId);
       }
     },
-    forceSave: () => selectedId !== null && void persist(selectedId, true),
+    forceSave: () => selectedId !== null && !isFlushingRef.current && void persist(selectedId, true),
     loadServerVersion,
+    flushPendingSaves,
     saveNow: () => {
-      if (selectedId === null) return;
+      if (selectedId === null || isFlushingRef.current) return;
       const timer = timersRef.current.get(selectedId);
       if (timer) window.clearTimeout(timer);
       timersRef.current.delete(selectedId);
