@@ -14,6 +14,7 @@ if errorlevel 1 (
 set "PYTHON_EXE=python"
 
 :run
+echo [START] Preparing local services...
 "%PYTHON_EXE%" "%~dp0launcher.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" pause

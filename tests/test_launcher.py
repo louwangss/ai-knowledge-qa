@@ -6,6 +6,32 @@ from pathlib import Path
 import pytest
 
 
+def test_health_check_uses_a_bounded_timeout(monkeypatch):
+    import launcher
+
+    captured = {}
+
+    class ReadyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_urlopen(url, *, timeout):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return ReadyResponse()
+
+    monkeypatch.setattr(launcher, "urlopen", fake_urlopen)
+
+    assert launcher.is_service_ready("http://127.0.0.1:8000/") is True
+    assert captured["url"] == "http://127.0.0.1:8000/"
+    assert 0 < captured["timeout"] <= 2
+
+
 def test_service_commands_use_current_python_and_project_root():
     import launcher
 
@@ -46,6 +72,59 @@ def test_main_reuses_an_existing_complete_stack(monkeypatch):
 
     assert exit_code == 0
     assert opened_urls == ["http://127.0.0.1:5173/app/"]
+
+
+def test_main_reports_progress_before_probing_existing_services(monkeypatch, capsys):
+    import launcher
+
+    services = launcher.build_services()
+
+    def assert_progress_was_printed(_services, _readiness=None):
+        assert "[检查]" in capsys.readouterr().out
+        return services[1].health_url
+
+    monkeypatch.setattr(launcher, "build_services", lambda: services)
+    monkeypatch.setattr(
+        launcher,
+        "get_running_stack_url",
+        assert_progress_was_printed,
+    )
+    monkeypatch.setattr(launcher.webbrowser, "open", lambda _url: None)
+
+    assert launcher.main() == 0
+
+
+def test_main_probes_each_stopped_service_once_before_start(monkeypatch):
+    import launcher
+
+    services = launcher.build_services()
+    probe_count = 0
+    probes_seen_at_start = []
+
+    def report_stopped(_url):
+        nonlocal probe_count
+        probe_count += 1
+        return False
+
+    def fake_popen(command, cwd, env):
+        probes_seen_at_start.append(probe_count)
+        return object()
+
+    monkeypatch.setattr(launcher, "build_services", lambda: services)
+    monkeypatch.setattr(launcher, "is_service_ready", report_stopped)
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launcher, "wait_for_service_ready", lambda _service: None)
+    monkeypatch.setattr(
+        launcher,
+        "wait_for_first_exit",
+        lambda _services: (services[0], 0),
+    )
+    monkeypatch.setattr(launcher, "stop_services", lambda _services: None)
+    monkeypatch.setattr(launcher.webbrowser, "open", lambda _url: None)
+
+    assert launcher.main() == 0
+    assert probes_seen_at_start[0] == len(services)
+    assert probe_count == len(services)
 
 
 def test_incomplete_existing_stack_is_not_reused(monkeypatch):
@@ -161,6 +240,9 @@ def test_windows_entrypoint_prefers_project_virtual_environment():
 
     assert "venv\\Scripts\\python.exe" in script
     assert "launcher.py" in script
+    assert script.index("echo [START]") < script.index(
+        '"%PYTHON_EXE%" "%~dp0launcher.py"'
+    )
 
 
 def test_web_url_contains_only_ephemeral_bootstrap_token():

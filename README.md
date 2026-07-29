@@ -222,6 +222,7 @@ python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 - Bearer token + 固定 `APP_USER_ID` 是单用户演示边界，不是注册、密码、角色、刷新 token 或完整多租户认证。
 - Web 会话只解决本机单用户演示的浏览器凭证隔离，不是完整多租户认证；公网部署前应增加 HTTPS、正式身份认证、限流和网络访问控制。
 - Redis 仍用于 React 的 HttpOnly 登录会话和登录限流；删除会话时还会尽力清理升级前遗留的固定对话 key，但不会读取或新写入这类数据。Redis 不可用时 Web 登录会返回 503，但 MySQL 中的会话、消息和摘要不会丢失，服务端 Bearer 客户端也不依赖 Redis 读取对话事实。
+- 启动器为本地 8000/5173 健康探测设置 1 秒 socket 超时参数，并在批处理和 Python 探测前分别立即输出进度；1 秒是针对回环地址的可调启发式值，不是完整请求耗时或网络服务 SLA。2026-07-29 核对的 Python 官方文档说明 `urlopen(..., timeout=...)` 会为阻塞操作设置超时。参考 [urllib.request.urlopen](https://docs.python.org/3/library/urllib.request.html#urllib.request.urlopen)。
 - ChatTurn 使用数据库时钟、每次执行独立 owner、90 秒租约与 30 秒心跳；多 worker 启动时只回收无租约或已过期的 turn，旧 worker 受 fencing 约束不能覆盖新 owner。90/30 是结合当前 30 秒流式空闲超时设定的启发式默认值，并非容量结论；生产部署应根据事件循环阻塞、数据库延迟和故障恢复指标重新校准。
 - `CHAT_STAGE_TIMEOUT_SECONDS=30` 延续项目原有 direct 流式空闲边界，并统一用于检索、Agent 与 deep 阶段；这是可调启发式默认值，不是上游 SLA。2026-07-29 核对的 Python 官方文档说明超时会取消当前等待，但线程中的同步工作不能被强制终止；DeepSeek 官方文档也只承诺等待期间发送 keep-alive，不提供应用层推荐时限。参考 [Python asyncio timeouts](https://docs.python.org/3/library/asyncio-task.html#timeouts) 与 [DeepSeek FAQ](https://api-docs.deepseek.com/faq)。
 - FastAPI 与 Vite 默认只监听 `127.0.0.1`；不要直接把开发服务端口暴露到公网。

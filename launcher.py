@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+# 本地回环健康探测的启发式 socket 超时；避免代理或半开端口长期阻塞。
+HEALTH_CHECK_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass
@@ -84,16 +86,37 @@ def build_web_url(services: list[Service]) -> str:
 def is_service_ready(health_url: str) -> bool:
     """判断健康接口是否已经可访问。"""
     try:
-        with urlopen(health_url) as response:
+        with urlopen(
+            health_url,
+            timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
+        ) as response:
             return response.status == 200
     except (OSError, URLError):
         return False
 
 
-def get_running_stack_url(services: list[Service]) -> str | None:
+def probe_service_readiness(services: list[Service]) -> dict[str, bool]:
+    """一次性探测服务状态，供复用判断和端口占用检查共享。"""
+    return {
+        service.name: bool(
+            service.health_url and is_service_ready(service.health_url)
+        )
+        for service in services
+    }
+
+
+def get_running_stack_url(
+    services: list[Service],
+    readiness: dict[str, bool] | None = None,
+) -> str | None:
     """完整服务栈已经运行时，返回可直接打开的 Web 工作区地址。"""
-    if not services or any(
-        not service.health_url or not is_service_ready(service.health_url)
+    readiness = (
+        readiness
+        if readiness is not None
+        else probe_service_readiness(services)
+    )
+    if not services or not all(
+        readiness.get(service.name, False)
         for service in services
     ):
         return None
@@ -119,12 +142,20 @@ def wait_for_service_ready(service: Service) -> None:
         time.sleep(0.1)
 
 
-def start_services(services: list[Service]) -> None:
+def start_services(
+    services: list[Service],
+    readiness: dict[str, bool] | None = None,
+) -> None:
     """并行拉起服务，再等待需要健康检查的服务就绪。"""
     try:
         # 先完成全部占用检查，避免启动部分进程后才发现旧后端仍在运行。
+        readiness = (
+            readiness
+            if readiness is not None
+            else probe_service_readiness(services)
+        )
         for service in services:
-            if service.health_url is not None and is_service_ready(service.health_url):
+            if readiness.get(service.name, False):
                 raise RuntimeError(
                     f"{service.name}地址已被占用，请先关闭旧服务"
                 )
@@ -179,14 +210,25 @@ def main(services: list[Service] | None = None) -> int:
     """启动并共同管理前后端生命周期。"""
     should_open_browser = services is None
     services = services or build_services()
-    running_stack_url = get_running_stack_url(services) if should_open_browser else None
+    readiness = None
+    if should_open_browser:
+        print("[检查] 正在检查本地服务状态……", flush=True)
+        readiness = probe_service_readiness(services)
+    running_stack_url = (
+        get_running_stack_url(services, readiness)
+        if should_open_browser
+        else None
+    )
     if running_stack_url:
         webbrowser.open(running_stack_url)
         print("[已运行] 检测到现有服务，已直接打开 React 工作区。")
         return 0
 
     try:
-        start_services(services)
+        if readiness is None:
+            start_services(services)
+        else:
+            start_services(services, readiness)
         web_url = build_web_url(services)
         if should_open_browser:
             webbrowser.open(web_url)
