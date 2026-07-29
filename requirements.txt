@@ -26,6 +26,7 @@ sentence-transformers
 
 # 数据库
 sqlalchemy
+alembic>=1.18,<1.19
 pymysql
 redis
 

@@ -1,5 +1,11 @@
-"""数据库结构版本、additive upgrade 与启动前完整性门禁。"""
+"""Alembic 迁移入口、旧库安全接管与启动前完整性门禁。"""
 
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, select, text, update
 
 from db.database import Base, engine
@@ -196,7 +202,7 @@ def _record_current_version(bind) -> None:
             )
 
 
-def upgrade_schema(bind=engine) -> None:
+def _upgrade_legacy_schema(bind=engine) -> None:
     """补齐 additive 结构并记录版本；权威业务数据不改写，孤儿 reservation 可清理。"""
     table_names = set(inspect(bind).get_table_names())
     if "schema_version" in table_names:
@@ -212,10 +218,10 @@ def upgrade_schema(bind=engine) -> None:
     _ensure_chat_turn_foreign_keys(bind)
     _ensure_indexes(bind)
     _record_current_version(bind)
-    assert_schema_ready(bind)
+    _assert_legacy_schema_ready(bind)
 
 
-def assert_schema_ready(bind=engine) -> None:
+def _assert_legacy_schema_ready(bind=engine) -> None:
     """启动前验证当前版本所需的表、列、外键、索引和版本标记。"""
     inspector = inspect(bind)
     table_names = set(inspector.get_table_names())
@@ -264,3 +270,63 @@ def assert_schema_ready(bind=engine) -> None:
             missing_indexes.append(index_name)
     if missing_indexes:
         raise _upgrade_instruction(f"缺少索引：{', '.join(sorted(missing_indexes))}")
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _alembic_config(connection=None) -> Config:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    if connection is not None:
+        config.attributes["connection"] = connection
+    return config
+
+
+def _alembic_head() -> str:
+    head = ScriptDirectory.from_config(_alembic_config()).get_current_head()
+    if head is None:
+        raise SchemaNotReadyError("Alembic 未定义 head revision")
+    return head
+
+
+def _current_alembic_revision(bind) -> str | None:
+    with bind.connect() as connection:
+        return MigrationContext.configure(connection).get_current_revision()
+
+
+def _run_alembic(bind, action, revision: str) -> None:
+    with bind.begin() as connection:
+        action(_alembic_config(connection), revision)
+
+
+def upgrade_schema(bind=engine) -> None:
+    """升级到 Alembic head；未版本化旧库先经旧门禁验证后再接管。"""
+    table_names = set(inspect(bind).get_table_names())
+    business_tables = table_names - {"alembic_version"}
+
+    if business_tables and "alembic_version" not in table_names:
+        # 先执行原有的安全增量升级，再做完整结构检查。只有检查通过才允许 stamp，
+        # 防止残缺库被误标为最新版本。
+        _upgrade_legacy_schema(bind)
+        _assert_legacy_schema_ready(bind)
+        _run_alembic(bind, command.stamp, "0001_current_schema")
+
+    _run_alembic(bind, command.upgrade, "head")
+    assert_schema_ready(bind)
+
+
+def downgrade_schema(bind=engine, revision: str = "-1") -> None:
+    """显式执行 Alembic 降级；仅供运维或迁移测试调用。"""
+    _run_alembic(bind, command.downgrade, revision)
+
+
+def assert_schema_ready(bind=engine) -> None:
+    """验证业务结构完整且 Alembic revision 与代码 head 一致。"""
+    _assert_legacy_schema_ready(bind)
+    current = _current_alembic_revision(bind)
+    head = _alembic_head()
+    if current != head:
+        raise _upgrade_instruction(
+            f"Alembic 当前版本为 {current!r}，应用要求 {head!r}"
+        )
