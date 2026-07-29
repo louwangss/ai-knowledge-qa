@@ -477,7 +477,7 @@ describe("React Chat 会话一致性", () => {
     expect(window.sessionStorage.getItem("aiqa.pending-chat-turns.v1")).toContain(pendingTurnId);
   });
 
-  it("删除进行中的会话列表刷新不会在删除成功后复活目标会话", async () => {
+  it("删除进行中的会话列表刷新在请求完成前后都不会复活目标会话", async () => {
     const deletion = deferred<void>();
     const staleRefresh = deferred<SessionSummary[]>();
     vi.mocked(api.deleteSession).mockReturnValueOnce(deletion.promise);
@@ -502,6 +502,9 @@ describe("React Chat 会话一致性", () => {
       staleRefresh.resolve(sessions);
       await Promise.resolve();
     });
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(["session-b"]);
+    expect(result.current.selectedId).toBe("session-b");
 
     await act(async () => {
       deletion.resolve(undefined);

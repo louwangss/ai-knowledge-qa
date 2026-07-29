@@ -167,6 +167,10 @@ export function useChatWorkspace(userId: string) {
       requestVersion !== latestRefreshRequestRef.current
       || mutationVersion !== sessionMutationVersionRef.current
     ) return items;
+    const deletingSessionId = deletingSessionIdRef.current;
+    const visibleItems = deletingSessionId
+      ? items.filter((item) => item.id !== deletingSessionId)
+      : items;
     const existingIds = new Set(items.map((item) => item.id));
     let pendingChanged = false;
     for (const [fingerprint, turn] of pendingTurnsRef.current) {
@@ -176,14 +180,14 @@ export function useChatWorkspace(userId: string) {
       }
     }
     if (pendingChanged) writePendingTurns(pendingTurnsRef.current);
-    setSessions(items);
+    setSessions(visibleItems);
     setSelectedId((current) => {
       const preferred = preferredId ?? current;
-      return preferred && items.some((item) => item.id === preferred)
+      return preferred && visibleItems.some((item) => item.id === preferred)
         ? preferred
-        : items[0]?.id ?? null;
+        : visibleItems[0]?.id ?? null;
     });
-    return items;
+    return visibleItems;
   }, [userId]);
 
   useEffect(() => {
