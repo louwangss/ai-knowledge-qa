@@ -23,6 +23,16 @@ def test_requirements_declares_direct_langchain_integrations():
         assert package in requirements
 
 
+def test_private_context_is_not_exposed_to_tool_calling_agent():
+    chat_route = (PROJECT_ROOT / "app" / "api" / "routes_chat.py").read_text(encoding="utf-8")
+
+    assert "create_agent" not in chat_route
+    assert "literal_eval" not in chat_route
+    assert not (PROJECT_ROOT / "tools" / "web_search.py").exists()
+    assert "plan_web_search" in chat_route
+    assert "payload.message, current_date" in chat_route
+
+
 def test_gradio_runtime_is_fully_retired():
     requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
