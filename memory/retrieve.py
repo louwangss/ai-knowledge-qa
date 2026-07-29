@@ -6,8 +6,8 @@ import logging
 from typing import TYPE_CHECKING
 
 from db.database import SessionLocal
+from memory.conversation import load_conversation_memory
 from memory.episodic import get_recent_events
-from memory.short_term import get_short_term_memory, get_redis
 
 if TYPE_CHECKING:
     from langchain_chroma import Chroma
@@ -66,11 +66,11 @@ def _load_recent_events(user_id: str, limit: int):
         db.close()
 
 
-def _load_short_term(r, user_id: str, session_id: str) -> dict:
-    """在当前工作线程内创建并关闭短期记忆恢复 Session。"""
+def _load_conversation(user_id: str, session_id: str) -> dict:
+    """在当前工作线程内读取并关闭 MySQL 权威会话记忆 Session。"""
     db = SessionLocal()
     try:
-        return get_short_term_memory(r, user_id, session_id, db)
+        return load_conversation_memory(db, user_id, session_id)
     finally:
         db.close()
 
@@ -86,7 +86,6 @@ async def retrieve_context(
     Args:
         mode: "normal" 执行全部 4 路；"deep" 跳过文档检索（Agent B 会做）
     """
-    r = get_redis()
     rag_vs = get_rag_vector_store()
     semantic_vs = get_semantic_vector_store()
 
@@ -97,21 +96,21 @@ async def retrieve_context(
     async def search_episodic(uid, limit):
         return await asyncio.to_thread(_load_recent_events, uid, limit)
 
-    async def get_short_term(r, uid, sid):
-        return await asyncio.to_thread(_load_short_term, r, uid, sid)
+    async def get_conversation(uid, sid):
+        return await asyncio.to_thread(_load_conversation, uid, sid)
 
     if mode == "normal":
         doc_results, note_results, episodic_results, short_term = await asyncio.gather(
             search_async(rag_vs, user_id, question, top_k=3, doc_type="document"),
             search_async(semantic_vs, user_id, question, top_k=3, doc_type="note"),
             search_episodic(user_id, limit=5),
-            get_short_term(r, user_id, session_id),
+            get_conversation(user_id, session_id),
         )
     else:  # deep 模式跳过文档检索
         note_results, episodic_results, short_term = await asyncio.gather(
             search_async(semantic_vs, user_id, question, top_k=3, doc_type="note"),
             search_episodic(user_id, limit=5),
-            get_short_term(r, user_id, session_id),
+            get_conversation(user_id, session_id),
         )
         doc_results = []
 

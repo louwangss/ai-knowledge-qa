@@ -4,7 +4,11 @@ import logging
 
 import redis
 
-from config import REDIS_URL
+from config import (
+    REDIS_URL,
+    SUMMARY_LLM_MAX_RETRIES,
+    SUMMARY_LLM_TIMEOUT_SECONDS,
+)
 from rag.llm import get_llm
 
 logger = logging.getLogger(__name__)
@@ -331,7 +335,11 @@ def _persist_summary_to_mysql(db_session, session_id: str, summary: str, compres
 
 def _generate_summary(existing_summary: str, old_messages: list[dict]) -> str:
     """调用 LLM 生成合并摘要"""
-    llm = get_llm(temperature=0.0)
+    llm = get_llm(
+        temperature=0.0,
+        timeout=SUMMARY_LLM_TIMEOUT_SECONDS,
+        max_retries=SUMMARY_LLM_MAX_RETRIES,
+    )
 
     conversation = "\n".join(
         f"{msg['role']}: {msg['content'][:200]}" for msg in old_messages

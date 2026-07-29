@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,8 +21,12 @@ from app.deps import require_api_access
 from app.error_handler import value_error_handler, generic_error_handler
 from app.observability import RequestObservabilityMiddleware
 from app.security_headers import SecurityHeadersMiddleware
-from app.startup import initialize_app_user
+from app.startup import (
+    initialize_app_user,
+    recover_interrupted_chat_turns,
+)
 from config import API_HOST
+from db.schema import assert_schema_ready
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,12 +50,18 @@ async def _compensation_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await asyncio.to_thread(assert_schema_ready)
+    await asyncio.to_thread(recover_interrupted_chat_turns)
     await asyncio.to_thread(initialize_app_user)
     task = asyncio.create_task(_compensation_loop())
     logger.info("FastAPI 启动，后台补偿任务已启动")
-    yield
-    task.cancel()
-    logger.info("FastAPI 关闭")
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        logger.info("FastAPI 关闭")
 
 
 app = FastAPI(title="AI 知识库问答系统", lifespan=lifespan)
@@ -72,7 +83,7 @@ app.add_exception_handler(Exception, generic_error_handler)
 # 前端构建存在时提供同源静态托管；开发模式仍由 Vite 代理 API。
 WEB_DIST_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST_DIR.is_dir():
-    app.mount("/app", StaticFiles(directory=WEB_DIST_DIR, html=True), name="notes-web")
+    app.mount("/app", StaticFiles(directory=WEB_DIST_DIR, html=True), name="react-web")
 
 
 @app.get("/")

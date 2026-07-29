@@ -1,25 +1,14 @@
-"""建表脚本
+"""数据库初始化与 additive upgrade 脚本
 
 用法：
-    python -m db.init_db          # 仅建表
-    python -m db.init_db --drop   # 先删再建（清空所有数据）
+    python -m db.init_db             # 安全创建/升级缺失结构
+    python -m db.init_db --upgrade   # 同上，供部署脚本显式调用
+    python -m db.init_db --drop      # 先删再建（会清空所有数据）
 """
-import sys
+import argparse
 from db.database import engine, Base
 from db.models import *  # noqa: F401,F403 - 确保所有模型被导入
-
-
-INDEX_SQL = [
-    "CREATE INDEX idx_chat_session ON chat_history(user_id, session_id, created_at)",
-    "CREATE INDEX idx_chat_user_time ON chat_history(user_id, created_at)",
-    "CREATE INDEX idx_episodic_dedup ON episodic_memory(user_id, event_type, created_at)",
-    "CREATE INDEX idx_episodic_user_time ON episodic_memory(user_id, created_at)",
-    "CREATE INDEX idx_semantic_chroma ON semantic_memory(chroma_id)",
-    "CREATE INDEX idx_semantic_user ON semantic_memory(user_id)",
-    "CREATE UNIQUE INDEX idx_doc_hash ON documents(user_id, content_hash)",
-    "CREATE INDEX idx_session_user ON sessions(user_id, status, last_active)",
-    "CREATE UNIQUE INDEX idx_session_summary ON session_summary(session_id)",
-]
+from db.schema import INDEX_SQL, upgrade_schema
 
 
 def init_db(drop=False):
@@ -28,25 +17,19 @@ def init_db(drop=False):
         Base.metadata.drop_all(engine)
         print("done")
 
-    print("创建所有表...")
-    Base.metadata.create_all(engine)
-    print("done")
-
-    print("创建索引...")
-    with engine.connect() as conn:
-        for sql in INDEX_SQL:
-            try:
-                conn.execute(__import__("sqlalchemy").text(sql))
-            except Exception as e:
-                # 索引已存在则跳过
-                if "Duplicate" in str(e):
-                    pass
-                else:
-                    print(f"  跳过: {sql[:60]}... ({e})")
-        conn.commit()
+    print("创建或升级数据库结构...")
+    upgrade_schema(engine)
     print("done")
 
 
 if __name__ == "__main__":
-    drop = "--drop" in sys.argv
-    init_db(drop=drop)
+    parser = argparse.ArgumentParser(description="初始化或升级数据库结构")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="补齐缺失表、列、索引和外键，不改写权威业务数据",
+    )
+    action.add_argument("--drop", action="store_true", help="删除全部表后重建（会清空所有数据）")
+    args = parser.parse_args()
+    init_db(drop=args.drop)

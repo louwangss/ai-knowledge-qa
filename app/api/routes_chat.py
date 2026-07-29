@@ -1,23 +1,31 @@
 """Chat 路由：POST /api/v1/chat — SSE 流式输出，normal + deep 双模式"""
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import time
+import uuid
+from contextlib import suppress
+from numbers import Real
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, selectinload
 
 from app.deps import get_db, require_app_user
-from app.models.schemas import ChatRequest, ChatMessage
-from app.observability import get_or_create_request_id, log_event, new_turn_id
+from app.chat_turn_lease import get_database_utc_now, has_live_lease, new_lease_expiry
+from app.models.schemas import ChatMessage, ChatRequest, ChatTurnStatusResponse
+from app.observability import get_or_create_request_id, log_event
 from app.stream_utils import stream_with_idle_timeout
-from db.models import ChatHistory, Session as SessionModel, User
-from memory.short_term import (
-    get_redis, append_message, increment_round, renew_ttl,
-    maybe_compress, cleanup_failed_turn, restore_from_mysql_if_needed,
-)
+from db.models import ChatHistory, ChatSource, ChatTurn, Session as SessionModel, User
+from db.database import SessionLocal
+from config import CHAT_TURN_HEARTBEAT_SECONDS, CHAT_TURN_LEASE_SECONDS
+from memory.conversation import maybe_compress_conversation
 from memory.episodic import record_event
 from memory.retrieve import retrieve_context
 from rag.llm import get_llm
@@ -26,6 +34,11 @@ from tools.calculator import calculator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
+
+# source 与已有 Document.file_path 一样属于路径/URL 展示字段，沿用 500 字符边界。
+CHAT_SOURCE_MAX_LENGTH = 500
+# deep 模式的设计边界是 3~5 个子问题、每题检索 3 段，因此最多保留 15 个来源。
+CHAT_SOURCE_MAX_COUNT = 15
 
 
 # ---- 格式化辅助 ----
@@ -80,8 +93,264 @@ def _format_sources(context: dict) -> list[dict]:
     return sources
 
 
+def _normalize_sources(raw_sources: object) -> list[dict]:
+    """将检索/工具输出收敛为可持久化、可安全序列化的稳定来源列表。"""
+    if not isinstance(raw_sources, list):
+        return []
+
+    normalized = []
+    seen = set()
+    for item in raw_sources:
+        if len(normalized) >= CHAT_SOURCE_MAX_COUNT:
+            break
+        if not isinstance(item, dict):
+            continue
+        raw_source = item.get("source")
+        if not isinstance(raw_source, str):
+            continue
+        source = raw_source.strip()[:CHAT_SOURCE_MAX_LENGTH]
+        if not source or source in seen:
+            continue
+
+        raw_score = item.get("score", 0)
+        score = (
+            float(raw_score)
+            if isinstance(raw_score, Real) and not isinstance(raw_score, bool)
+            else 0.0
+        )
+        if not math.isfinite(score):
+            score = 0.0
+
+        seen.add(source)
+        normalized.append({"source": source, "score": score})
+    return normalized
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _request_fingerprint(payload: ChatRequest) -> str:
+    """对一次请求的身份与内容做无歧义指纹，防止幂等键误复用。"""
+    canonical = json.dumps(
+        {
+            "message": payload.message,
+            "mode": payload.mode,
+            "session_id": payload.session_id,
+            "user_id": payload.user_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _turn_conflict(code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={"code": code, "message": message},
+    )
+
+
+def _load_completed_replay(db: Session, turn: ChatTurn) -> tuple[str, list[dict]]:
+    assistant = db.execute(
+        select(ChatHistory)
+        .options(selectinload(ChatHistory.sources))
+        .where(
+            ChatHistory.id == turn.assistant_message_id,
+            ChatHistory.user_id == turn.user_id,
+            ChatHistory.session_id == turn.session_id,
+            ChatHistory.role == "assistant",
+        )
+    ).scalar_one_or_none()
+    if assistant is None:
+        raise RuntimeError("completed turn 缺少 assistant 消息")
+    sources = _normalize_sources([
+        {"source": item.source, "score": item.score}
+        for item in assistant.sources
+    ])
+    return assistant.content, sources
+
+
+def _claim_existing_chat_turn(
+    db: Session,
+    client_turn_id: str,
+    fingerprint: str,
+    lease_owner: str,
+    missing_error: Exception | None = None,
+) -> tuple[str, str | None, tuple[str, list[dict]] | None]:
+    if db.in_transaction():
+        db.rollback()
+    with db.begin():
+        turn = db.execute(
+            select(ChatTurn)
+            .where(ChatTurn.client_turn_id == client_turn_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if turn is None:
+            if missing_error is not None:
+                raise missing_error
+            raise RuntimeError("ChatTurn reservation 已不存在")
+        if turn.request_fingerprint != fingerprint:
+            raise _turn_conflict(
+                "TURN_ID_REUSED",
+                "client_turn_id 已用于其他请求",
+            )
+        database_now = get_database_utc_now(db)
+        if turn.status == "processing" and has_live_lease(turn, database_now):
+            raise _turn_conflict("TURN_IN_PROGRESS", "该请求正在处理中")
+        if turn.status in {"processing", "failed"}:
+            turn.status = "processing"
+            turn.user_message_id = None
+            turn.assistant_message_id = None
+            turn.lease_owner = lease_owner
+            turn.lease_expires_at = new_lease_expiry(db, CHAT_TURN_LEASE_SECONDS)
+            turn.updated_at = database_now
+            return client_turn_id, lease_owner, None
+        if turn.status == "completed":
+            return client_turn_id, None, _load_completed_replay(db, turn)
+        raise RuntimeError(f"未知 ChatTurn 状态: {turn.status}")
+
+
+def _reserve_chat_turn(
+    db: Session,
+    payload: ChatRequest,
+) -> tuple[str, str | None, tuple[str, list[dict]] | None]:
+    """原子创建/认领 turn；已完成时返回可直接重放的最终事实。"""
+    client_turn_id = str(payload.client_turn_id or uuid.uuid4())
+    fingerprint = _request_fingerprint(payload)
+    lease_owner = str(uuid.uuid4())
+    # 同一请求 Session 可能刚读取过该 turn；先处理已存在状态并避免 identity 冲突。
+    db.rollback()
+    if db.get(ChatTurn, client_turn_id) is not None:
+        return _claim_existing_chat_turn(
+            db,
+            client_turn_id,
+            fingerprint,
+            lease_owner,
+        )
+
+    # 不存在时仍以主键唯一约束争抢 reservation，覆盖并发插入竞争。
+    db.rollback()
+    candidate = ChatTurn(
+        client_turn_id=client_turn_id,
+        user_id=payload.user_id,
+        session_id=payload.session_id,
+        request_fingerprint=fingerprint,
+        status="processing",
+        lease_owner=lease_owner,
+        lease_expires_at=new_lease_expiry(db, CHAT_TURN_LEASE_SECONDS),
+    )
+    db.add(candidate)
+    try:
+        db.commit()
+        return client_turn_id, lease_owner, None
+    except IntegrityError as exc:
+        db.rollback()
+        return _claim_existing_chat_turn(
+            db,
+            client_turn_id,
+            fingerprint,
+            lease_owner,
+            missing_error=exc,
+        )
+
+
+def _renew_chat_turn_lease(
+    db: Session,
+    turn_id: str,
+    lease_owner: str,
+) -> bool:
+    """仅由当前且尚未过期的 owner 续租；行锁保证检查与更新原子。"""
+    if db.in_transaction():
+        db.rollback()
+    with db.begin():
+        turn = db.execute(
+            select(ChatTurn)
+            .where(ChatTurn.client_turn_id == turn_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        database_now = get_database_utc_now(db)
+        if (
+            turn is None
+            or turn.status != "processing"
+            or turn.lease_owner != lease_owner
+            or not has_live_lease(turn, database_now)
+        ):
+            return False
+        turn.lease_expires_at = new_lease_expiry(db, CHAT_TURN_LEASE_SECONDS)
+        turn.updated_at = database_now
+    return True
+
+
+def _renew_chat_turn_lease_with_new_session(
+    turn_id: str,
+    lease_owner: str,
+) -> bool:
+    db = SessionLocal()
+    try:
+        return _renew_chat_turn_lease(db, turn_id, lease_owner)
+    finally:
+        db.close()
+
+
+async def _chat_turn_heartbeat(
+    turn_id: str,
+    lease_owner: str,
+    lease_lost: asyncio.Event,
+) -> None:
+    """在独立短事务中续租；任何续租失败都让旧执行流停止提交。"""
+    while True:
+        await asyncio.sleep(CHAT_TURN_HEARTBEAT_SECONDS)
+        try:
+            renewed = await asyncio.to_thread(
+                _renew_chat_turn_lease_with_new_session,
+                turn_id,
+                lease_owner,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "ChatTurn 心跳失败: turn_id=%s error_type=%s",
+                turn_id,
+                type(exc).__name__,
+            )
+            renewed = False
+        if not renewed:
+            lease_lost.set()
+            return
+
+
+def _raise_if_lease_lost(lease_lost: asyncio.Event) -> None:
+    if lease_lost.is_set():
+        raise RuntimeError("ChatTurn 租约已丢失或过期")
+
+
+async def _replay_completed_turn(answer: str, sources: list[dict]):
+    if answer:
+        yield _sse("token", {"content": answer})
+    yield _sse("sources", {"content": sources})
+    yield _sse("done", {})
+
+
+def _streaming_response(
+    iterator,
+    turn_id: str,
+    background: BackgroundTask | None = None,
+) -> StreamingResponse:
+    return StreamingResponse(
+        iterator,
+        media_type="text/event-stream",
+        background=background,
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-Chat-Turn-ID": turn_id,
+        },
+    )
 
 
 def _get_error_message(e: Exception) -> str:
@@ -164,16 +433,26 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    r = get_redis()
     request_id = get_or_create_request_id()
-    turn_id = new_turn_id()
+    turn_id, lease_owner, replay = _reserve_chat_turn(db, payload)
+    if replay is not None:
+        answer, sources = replay
+        return _streaming_response(
+            _replay_completed_turn(answer, sources),
+            turn_id,
+        )
+    if lease_owner is None:
+        raise RuntimeError("processing ChatTurn 缺少租约所有者")
 
     async def event_generator():
-        user_msg_id = None
-        round_incremented = False
+        lease_lost = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            _chat_turn_heartbeat(turn_id, lease_owner, lease_lost)
+        )
         answer_persisted = False
+        failure_recorded = False
         first_token_logged = False
-        stage = "restore"
+        stage = "retrieval"
         turn_started_at = time.perf_counter()
 
         def turn_event(event: str, *, level: int = logging.INFO, **fields):
@@ -197,40 +476,15 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 duration_ms=round((time.perf_counter() - turn_started_at) * 1000, 2),
             )
 
+        def mark_failed():
+            nonlocal failure_recorded
+            if answer_persisted or failure_recorded:
+                return
+            failure_recorded = _mark_turn_failed(db, turn_id, lease_owner)
+
         try:
             turn_event("turn_started")
-            # 步骤 1: 先恢复当前请求之前的历史，避免把当前消息恢复并追加两次
-            restore_from_mysql_if_needed(r, payload.user_id, payload.session_id, db)
-
-            # 步骤 2: 持久化当前 user 消息
-            stage = "persist_user"
-            user_msg = ChatHistory(
-                user_id=payload.user_id,
-                session_id=payload.session_id,
-                role="user",
-                content=payload.message,
-                mode=payload.mode,
-            )
-            db.add(user_msg)
-            db.commit()
-            user_msg_id = user_msg.id
-
-            # 步骤 3-4: Redis 写入 + 轮数和 TTL
-            stage = "cache_user"
-            append_message(
-                r,
-                payload.user_id,
-                payload.session_id,
-                "user",
-                payload.message,
-                message_id=user_msg_id,
-            )
-            increment_round(r, payload.user_id, payload.session_id)
-            round_incremented = True
-            renew_ttl(r, payload.user_id, payload.session_id)
-
-            # 步骤 5: 并行检索
-            stage = "retrieval"
+            # 生成前不写 chat_history；上下文由 MySQL 权威历史读取。
             retrieval_started_at = time.perf_counter()
             context = await retrieve_context(
                 user_id=payload.user_id,
@@ -238,6 +492,7 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 question=payload.message,
                 mode=payload.mode,
             )
+            _raise_if_lease_lost(lease_lost)
             turn_event(
                 "turn_retrieval_completed",
                 duration_ms=round((time.perf_counter() - retrieval_started_at) * 1000, 2),
@@ -246,24 +501,28 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 episodic_count=len(context.get("episodic_memory", [])),
             )
 
-            # 初始化 sources（deep 模式不改此值；normal 模式可能覆盖）
+            # 初始化 sources；normal 可合并 web 来源，deep 可追加 Agent B 文档来源。
             all_sources = _format_sources(context)
 
-            # 步骤 6: LLM 流式生成
+            # LLM 流式生成
             stage = "llm"
             if payload.mode == "deep":
                 full_answer = ""
                 async for sse_str in _stream_deep(payload, context):
+                    _raise_if_lease_lost(lease_lost)
                     if sse_str.get("type") == "token":
                         full_answer += sse_str["content"]
                         record_first_token()
                         yield _sse("token", {"content": sse_str["content"]})
                     elif sse_str.get("type") == "status":
                         yield _sse("status", {"content": sse_str["content"]})
+                    elif sse_str.get("type") == "sources":
+                        all_sources.extend(sse_str["content"])
             else:
                 full_answer = ""
                 agent_sources = []
                 async for event in _stream_normal(payload, context):
+                    _raise_if_lease_lost(lease_lost)
                     if event["type"] == "token":
                         full_answer += event["content"]
                         record_first_token()
@@ -275,32 +534,20 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 # 合并 RAG 文档来源 + web_search 来源
                 all_sources = _format_sources(context) + agent_sources
 
-            # 步骤 7: 写 MySQL assistant 消息
-            stage = "persist_answer"
-            assistant_msg = ChatHistory(
-                user_id=payload.user_id,
-                session_id=payload.session_id,
-                role="assistant",
-                content=full_answer,
-            )
-            if not session.title:
-                session.title = payload.message[:15]
-            db.add(assistant_msg)
-            db.commit()
-            answer_persisted = True
+            all_sources = _normalize_sources(all_sources)
+            _raise_if_lease_lost(lease_lost)
 
-            # 步骤 8-11 是可补偿的派生状态；失败不能破坏已持久化的完整问答
-            stage = "derived_state"
-            _finalize_completed_turn(
+            # 完整一轮及 turn 完成状态只提交一次，不留下半轮事实。
+            stage = "persist_turn"
+            _persist_completed_turn(
                 db=db,
-                r=r,
                 payload=payload,
-                session=session,
-                assistant_msg_id=assistant_msg.id,
-                full_answer=full_answer,
-                request_id=request_id,
                 turn_id=turn_id,
+                lease_owner=lease_owner,
+                full_answer=full_answer,
+                sources=all_sources,
             )
+            answer_persisted = True
 
             turn_event(
                 "turn_completed",
@@ -321,8 +568,7 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 duration_ms=round((time.perf_counter() - turn_started_at) * 1000, 2),
                 answer_persisted=answer_persisted,
             )
-            if not answer_persisted:
-                _cleanup(db, r, payload, user_msg_id, round_incremented)
+            mark_failed()
             raise
         except Exception as e:
             turn_event(
@@ -333,75 +579,179 @@ async def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 duration_ms=round((time.perf_counter() - turn_started_at) * 1000, 2),
                 answer_persisted=answer_persisted,
             )
-            if not answer_persisted:
-                _cleanup(db, r, payload, user_msg_id, round_incremented)
-            else:
-                db.rollback()
+            mark_failed()
             yield _sse("error", {"content": _get_error_message(e)})
+        finally:
+            # 覆盖异步生成器被 aclose/GeneratorExit 提前关闭的路径。
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await heartbeat_task
+            mark_failed()
 
-    return StreamingResponse(
+    return _streaming_response(
         event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        turn_id,
+        background=BackgroundTask(
+            _finalize_completed_turn,
+            payload,
+            request_id,
+            turn_id,
+        ),
     )
 
 
-def _finalize_completed_turn(
+def _persist_completed_turn(
     db: Session,
-    r,
     payload: ChatRequest,
-    session: SessionModel,
-    assistant_msg_id: int,
+    turn_id: str,
+    lease_owner: str,
     full_answer: str,
+    sources: list[dict],
+) -> tuple[int, int]:
+    """一次事务写入完整问答、来源、会话元数据与 completed turn。"""
+    if db.in_transaction():
+        db.rollback()
+    with db.begin():
+        turn = db.execute(
+            select(ChatTurn)
+            .where(ChatTurn.client_turn_id == turn_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        database_now = get_database_utc_now(db)
+        if (
+            turn is None
+            or turn.status != "processing"
+            or turn.lease_owner != lease_owner
+            or not has_live_lease(turn, database_now)
+        ):
+            raise RuntimeError("ChatTurn 租约已丢失或过期")
+        if turn.request_fingerprint != _request_fingerprint(payload):
+            raise RuntimeError("ChatTurn 请求指纹不一致")
+
+        session = db.execute(
+            _select_session_for_completion(payload)
+        ).scalar_one_or_none()
+        if session is None:
+            raise RuntimeError("会话在回答生成期间已被删除")
+
+        user_msg = ChatHistory(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            role="user",
+            content=payload.message,
+            mode=payload.mode,
+        )
+        assistant_msg = ChatHistory(
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            role="assistant",
+            content=full_answer,
+            mode=payload.mode,
+        )
+        db.add(user_msg)
+        db.flush()
+        db.add(assistant_msg)
+        db.flush()
+        db.add_all([
+            ChatSource(
+                message_id=assistant_msg.id,
+                source=source["source"],
+                score=source["score"],
+                position=position,
+            )
+            for position, source in enumerate(sources)
+        ])
+
+        now = database_now
+        if not session.title:
+            session.title = payload.message[:15]
+        session.last_active = now
+        turn.status = "completed"
+        turn.user_message_id = user_msg.id
+        turn.assistant_message_id = assistant_msg.id
+        turn.lease_owner = None
+        turn.lease_expires_at = None
+        turn.updated_at = now
+
+    return user_msg.id, assistant_msg.id
+
+
+def _mark_turn_failed(db: Session, turn_id: str, lease_owner: str) -> bool:
+    """仅当前 owner 可标记失败，不能覆盖已完成或已被接管的 turn。"""
+    try:
+        db.rollback()
+        database_now = get_database_utc_now(db)
+        updated = db.query(ChatTurn).filter(
+            ChatTurn.client_turn_id == turn_id,
+            ChatTurn.status == "processing",
+            ChatTurn.lease_owner == lease_owner,
+        ).update(
+            {
+                ChatTurn.status: "failed",
+                ChatTurn.lease_owner: None,
+                ChatTurn.lease_expires_at: None,
+                ChatTurn.updated_at: database_now,
+            },
+            synchronize_session=False,
+        )
+        db.commit()
+        return updated == 1
+    except Exception as exc:
+        db.rollback()
+        logger.error(
+            "ChatTurn 失败状态持久化失败: error_type=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
+def _select_session_for_completion(payload: ChatRequest):
+    """最终写入前锁定当前 session；锁不跨越检索或 LLM。"""
+    return select(SessionModel).where(
+        SessionModel.id == payload.session_id,
+        SessionModel.user_id == payload.user_id,
+    ).with_for_update()
+
+
+def _finalize_completed_turn(
+    payload: ChatRequest,
     request_id: str,
     turn_id: str,
 ):
-    """best-effort 更新已完成问答的派生状态。"""
-    assistant_cached = False
+    """在响应后台线程用独立 Session best-effort 更新摘要和情景记忆。"""
+    db = SessionLocal()
     try:
-        append_message(
-            r,
-            payload.user_id,
-            payload.session_id,
-            "assistant",
-            full_answer,
-            message_id=assistant_msg_id,
-        )
-        assistant_cached = True
-    except Exception as exc:
-        _log_derived_failure(request_id, turn_id, payload.mode, "redis_assistant", exc)
+        status = db.execute(
+            select(ChatTurn.status).where(ChatTurn.client_turn_id == turn_id)
+        ).scalar_one_or_none()
+        db.rollback()
+        if status != "completed":
+            return
 
-    if assistant_cached:
         try:
-            maybe_compress(r, payload.user_id, payload.session_id, db_session=db)
+            maybe_compress_conversation(
+                db,
+                user_id=payload.user_id,
+                session_id=payload.session_id,
+            )
         except Exception as exc:
             db.rollback()
             _log_derived_failure(request_id, turn_id, payload.mode, "memory_compression", exc)
 
-    try:
-        record_event(
-            db,
-            user_id=payload.user_id,
-            session_id=payload.session_id,
-            event_type="qa_completed",
-            content=f"用户提问了「{payload.message[:50]}」，基于{'深度研究' if payload.mode == 'deep' else '普通问答'}模式回答",
-            question_text=payload.message,
-        )
-    except Exception as exc:
-        db.rollback()
-        _log_derived_failure(request_id, turn_id, payload.mode, "episodic_memory", exc)
-
-    try:
-        session.last_active = datetime.utcnow()
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        _log_derived_failure(request_id, turn_id, payload.mode, "last_active", exc)
-
-    try:
-        renew_ttl(r, payload.user_id, payload.session_id)
-    except Exception as exc:
-        _log_derived_failure(request_id, turn_id, payload.mode, "redis_ttl", exc)
+        try:
+            record_event(
+                db,
+                user_id=payload.user_id,
+                session_id=payload.session_id,
+                event_type="qa_completed",
+                content=f"用户提问了「{payload.message[:50]}」，基于{'深度研究' if payload.mode == 'deep' else '普通问答'}模式回答",
+                question_text=payload.message,
+            )
+        except Exception as exc:
+            db.rollback()
+            _log_derived_failure(request_id, turn_id, payload.mode, "episodic_memory", exc)
+    finally:
+        db.close()
 
 
 def _log_derived_failure(
@@ -421,35 +771,6 @@ def _log_derived_failure(
         stage=stage,
         error_type=type(exc).__name__,
     )
-
-
-def _cleanup(
-    db: Session,
-    r,
-    payload: ChatRequest,
-    user_msg_id: int | None,
-    round_incremented: bool,
-):
-    """清理尚未完成的当前问答，不影响其他请求或既有消息。"""
-    if user_msg_id is not None:
-        cleanup_failed_turn(
-            r,
-            payload.user_id,
-            payload.session_id,
-            message_id=user_msg_id,
-            content=payload.message,
-            decrement_round_count=round_incremented,
-        )
-
-    try:
-        db.rollback()
-        if user_msg_id is None:
-            return
-        db.query(ChatHistory).filter(ChatHistory.id == user_msg_id).delete()
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        logger.warning("失败 user 消息从 MySQL 清理失败: error_type=%s", type(exc).__name__)
 
 
 # ---- normal 模式流式 ----
@@ -580,10 +901,56 @@ async def _stream_deep(payload: ChatRequest, context: dict):
                 elif "retrieved_docs" in update:
                     docs = update["retrieved_docs"]
                     yield {"type": "status", "content": f"已检索到 {len(docs)} 段相关内容"}
+                    yield {
+                        "type": "sources",
+                        "content": [
+                            {
+                                "source": doc.get("source", "unknown"),
+                                "score": doc.get("score", 0),
+                            }
+                            for doc in docs
+                        ],
+                    }
                     yield {"type": "status", "content": "正在生成回答..."}
         elif mode_name == "custom":
             if isinstance(data, dict) and data.get("type") == "token":
                 yield {"type": "token", "content": data["content"]}
+
+
+@router.get("/turn", response_model=ChatTurnStatusResponse)
+def get_chat_turn_status(
+    user_id: str = Query(...),
+    session_id: str = Query(...),
+    client_turn_id: uuid.UUID = Query(...),
+    db: Session = Depends(get_db),
+):
+    """只返回当前会话中 turn 的状态，不暴露请求指纹或消息正文。"""
+    require_app_user(user_id)
+    session = db.query(SessionModel).filter(
+        SessionModel.id == session_id,
+        SessionModel.user_id == user_id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    turn = db.query(ChatTurn).filter(
+        ChatTurn.client_turn_id == str(client_turn_id),
+        ChatTurn.user_id == user_id,
+        ChatTurn.session_id == session_id,
+    ).first()
+    if not turn:
+        raise HTTPException(status_code=404, detail="请求不存在")
+    status = turn.status
+    if status == "processing" and not has_live_lease(
+        turn,
+        get_database_utc_now(db),
+    ):
+        # 查询保持只读；下次同一 client_turn_id 请求会原子接管该过期 turn。
+        status = "failed"
+    return ChatTurnStatusResponse(
+        client_turn_id=client_turn_id,
+        status=status,
+    )
 
 
 @router.get("/history", response_model=list[ChatMessage])
@@ -600,7 +967,9 @@ def get_chat_history(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    return db.query(ChatHistory).filter(
+    return db.query(ChatHistory).options(
+        selectinload(ChatHistory.sources),
+    ).filter(
         ChatHistory.user_id == user_id,
         ChatHistory.session_id == session_id,
-    ).order_by(ChatHistory.created_at.asc()).all()
+    ).order_by(ChatHistory.created_at.asc(), ChatHistory.id.asc()).all()

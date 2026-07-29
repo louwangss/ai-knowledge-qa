@@ -51,7 +51,7 @@ def test_retrieve_context_uses_distinct_worker_sessions_and_closes_them():
         sessions_seen.append(db)
         return [SimpleNamespace(content="学习事件", event_type="qa_completed")]
 
-    def fake_short_term(redis, user_id, session_id, db_session):
+    def fake_conversation(db_session, user_id, session_id):
         sessions_seen.append(db_session)
         return {"summary": None, "messages": []}
 
@@ -63,9 +63,8 @@ def test_retrieve_context_uses_distinct_worker_sessions_and_closes_them():
         stack.enter_context(
             patch.object(retrieve, "get_semantic_vector_store", return_value=FakeVectorStore("笔记", "note"))
         )
-        stack.enter_context(patch.object(retrieve, "get_redis", return_value=object()))
         stack.enter_context(patch.object(retrieve, "get_recent_events", side_effect=fake_recent_events))
-        stack.enter_context(patch.object(retrieve, "get_short_term_memory", side_effect=fake_short_term))
+        stack.enter_context(patch.object(retrieve, "load_conversation_memory", side_effect=fake_conversation))
 
         context = asyncio.run(
             retrieve.retrieve_context(
@@ -128,12 +127,11 @@ def test_deep_mode_keeps_contract_and_skips_document_search():
         stack.enter_context(patch.object(retrieve, "SessionLocal", session_factory))
         stack.enter_context(patch.object(retrieve, "get_rag_vector_store", return_value=document_store))
         stack.enter_context(patch.object(retrieve, "get_semantic_vector_store", return_value=note_store))
-        stack.enter_context(patch.object(retrieve, "get_redis", return_value=object()))
         stack.enter_context(patch.object(retrieve, "get_recent_events", return_value=[]))
         stack.enter_context(
             patch.object(
                 retrieve,
-                "get_short_term_memory",
+                "load_conversation_memory",
                 return_value={"summary": "早期摘要", "messages": []},
             )
         )

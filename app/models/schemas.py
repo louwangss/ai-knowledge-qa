@@ -1,5 +1,7 @@
 """Pydantic 请求/响应模型"""
 from datetime import datetime
+from typing import Literal
+from uuid import UUID
 from pydantic import BaseModel, Field, computed_field, field_validator
 
 from app.note_version import build_note_version
@@ -54,7 +56,21 @@ class ChatRequest(BaseModel):
     user_id: str
     session_id: str
     message: str
-    mode: str = "normal"  # normal / deep
+    mode: Literal["normal", "deep"] = "normal"
+    client_turn_id: UUID | None = None
+
+
+class ChatSourceResponse(BaseModel):
+    source: str
+    score: float
+
+    class Config:
+        from_attributes = True
+
+
+class ChatTurnStatusResponse(BaseModel):
+    client_turn_id: UUID
+    status: Literal["processing", "completed", "failed"]
 
 
 class ChatMessage(BaseModel):
@@ -63,6 +79,7 @@ class ChatMessage(BaseModel):
     content: str
     mode: str | None
     created_at: datetime
+    sources: list[ChatSourceResponse] | None = None
 
     class Config:
         from_attributes = True

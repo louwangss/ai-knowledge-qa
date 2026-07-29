@@ -11,6 +11,8 @@ from app.models.schemas import SessionCreate, SessionResponse
 from db.models import (
     Session as SessionModel,
     ChatHistory,
+    ChatSource,
+    ChatTurn,
     EpisodicMemory,
     SessionSummary,
     User,
@@ -45,12 +47,16 @@ def list_sessions(user_id: str = Query(...), db: Session = Depends(get_db)):
     return db.query(SessionModel).filter(
         SessionModel.user_id == user_id,
         SessionModel.status == "active",
-    ).order_by(SessionModel.last_active.desc()).all()
+    ).order_by(
+        SessionModel.last_active.desc(),
+        SessionModel.created_at.desc(),
+        SessionModel.id.desc(),
+    ).all()
 
 
 @router.delete("/{session_id}")
 def delete_session(session_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
-    """硬删除会话 + 关联的 chat_history + episodic_memory"""
+    """硬删除会话及关联的消息、来源、摘要与情景记忆。"""
     require_app_user(user_id)
     session = db.query(SessionModel).filter(
         SessionModel.id == session_id,
@@ -60,6 +66,13 @@ def delete_session(session_id: str, user_id: str = Query(...), db: Session = Dep
         raise HTTPException(status_code=404, detail="会话不存在")
 
     try:
+        db.query(ChatTurn).filter(ChatTurn.session_id == session_id).delete()
+        message_ids = db.query(ChatHistory.id).filter(
+            ChatHistory.session_id == session_id,
+        )
+        db.query(ChatSource).filter(
+            ChatSource.message_id.in_(message_ids),
+        ).delete(synchronize_session=False)
         db.query(ChatHistory).filter(ChatHistory.session_id == session_id).delete()
         db.query(EpisodicMemory).filter(EpisodicMemory.session_id == session_id).delete()
         db.query(SessionSummary).filter(SessionSummary.session_id == session_id).delete()

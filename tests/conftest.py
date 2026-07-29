@@ -28,4 +28,6 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolate_real_startup_database(monkeypatch):
     """TestClient 进入 lifespan 时不连接开发者的真实 MySQL。"""
+    monkeypatch.setattr("app.main.assert_schema_ready", lambda: None)
+    monkeypatch.setattr("app.main.recover_interrupted_chat_turns", lambda: None)
     monkeypatch.setattr("app.main.initialize_app_user", lambda: None)

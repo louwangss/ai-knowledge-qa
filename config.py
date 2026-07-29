@@ -41,9 +41,28 @@ def _positive_int_env(name: str, default: str) -> int:
     return value
 
 
+def _non_negative_int_env(name: str, default: str) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError as exc:
+        raise RuntimeError(f"环境变量 {name} 必须为非负整数") from exc
+    if value < 0:
+        raise RuntimeError(f"环境变量 {name} 必须为非负整数")
+    return value
+
+
 WEB_SESSION_TTL_SECONDS = _positive_int_env("APP_WEB_SESSION_TTL_SECONDS", "604800")
 WEB_LOGIN_MAX_ATTEMPTS = _positive_int_env("APP_WEB_LOGIN_MAX_ATTEMPTS", "10")
 WEB_LOGIN_WINDOW_SECONDS = _positive_int_env("APP_WEB_LOGIN_WINDOW_SECONDS", "300")
+
+# ChatTurn 租约是可调的启发式边界：默认覆盖 3 个心跳周期，避免短暂调度抖动误判。
+CHAT_TURN_LEASE_SECONDS = _positive_int_env("CHAT_TURN_LEASE_SECONDS", "90")
+CHAT_TURN_HEARTBEAT_SECONDS = _positive_int_env("CHAT_TURN_HEARTBEAT_SECONDS", "30")
+if CHAT_TURN_LEASE_SECONDS < CHAT_TURN_HEARTBEAT_SECONDS * 3:
+    raise RuntimeError(
+        "环境变量 CHAT_TURN_LEASE_SECONDS 必须至少为 "
+        "CHAT_TURN_HEARTBEAT_SECONDS 的 3 倍"
+    )
 
 # Tavily 可选（不用 web_search 时不需要）
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
@@ -80,6 +99,8 @@ EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 # --- LLM ---
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+SUMMARY_LLM_TIMEOUT_SECONDS = _positive_int_env("SUMMARY_LLM_TIMEOUT_SECONDS", "30")
+SUMMARY_LLM_MAX_RETRIES = _non_negative_int_env("SUMMARY_LLM_MAX_RETRIES", "0")
 
 # --- RAG 检索 ---
 RAG_RELEVANCE_THRESHOLD = float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0.5"))

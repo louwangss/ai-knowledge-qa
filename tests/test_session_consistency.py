@@ -1,6 +1,7 @@
 """会话删除完整性与 session-user 归属校验。"""
 
 import asyncio
+from datetime import datetime
 
 import pytest
 from fastapi import HTTPException
@@ -10,9 +11,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.api import routes_chat, routes_sessions
 from app.models.schemas import ChatRequest
+from db import models as db_models
+from db.init_db import INDEX_SQL
 from db.database import Base
 from db.models import (
     ChatHistory,
+    ChatTurn,
     EpisodicMemory,
     Session as SessionModel,
     SessionSummary,
@@ -79,6 +83,13 @@ def db_session():
                 summary="早期摘要",
                 compressed_count=2,
             ),
+            ChatTurn(
+                client_turn_id="00000000-0000-4000-8000-000000000001",
+                user_id="u1",
+                session_id="s1",
+                request_fingerprint="a" * 64,
+                status="processing",
+            ),
         ])
         db.commit()
         yield db
@@ -108,8 +119,34 @@ def test_delete_session_removes_summary_relations_and_redis_state(db_session, mo
     assert db_session.execute(select(ChatHistory)).scalars().all() == []
     assert db_session.execute(select(EpisodicMemory)).scalars().all() == []
     assert db_session.execute(select(SessionSummary)).scalars().all() == []
+    assert db_session.execute(select(ChatTurn)).scalars().all() == []
     assert all(key not in redis.values for key in session_keys)
     assert redis.values["unrelated"] == "keep"
+
+
+def test_delete_session_removes_persisted_chat_sources(db_session, monkeypatch):
+    """删除会话时应先清除回答关联的结构化来源。"""
+    chat_source_model = getattr(db_models, "ChatSource")
+    db_session.add(chat_source_model(
+        message_id=1,
+        source="架构说明.md",
+        score=0.25,
+        position=0,
+    ))
+    db_session.commit()
+    monkeypatch.setattr(routes_sessions, "get_redis", lambda: FakeRedis(), raising=False)
+
+    routes_sessions.delete_session("s1", user_id="u1", db=db_session)
+
+    assert db_session.execute(select(chat_source_model)).scalars().all() == []
+
+
+def test_chat_sources_lookup_index_is_declared():
+    """初始化脚本应为 history 聚合来源声明稳定的查询索引。"""
+    assert any(
+        "chat_sources(message_id, position)" in statement
+        for statement in INDEX_SQL
+    )
 
 
 def test_other_user_cannot_delete_session(db_session, monkeypatch):
@@ -131,6 +168,53 @@ def test_other_user_cannot_read_session_history(db_session):
         routes_chat.get_chat_history(user_id="u2", session_id="s1", db=db_session)
 
     assert exc_info.value.status_code == 403
+
+
+def test_history_uses_message_id_as_stable_tiebreaker(db_session):
+    """同一时间戳的消息必须按自增 ID 稳定返回。"""
+    same_time = datetime(2026, 7, 29, 10, 0, 0)
+    first = db_session.get(ChatHistory, 1)
+    first.created_at = same_time
+    db_session.add_all([
+        ChatHistory(
+            id=3,
+            user_id="u1",
+            session_id="s1",
+            role="assistant",
+            content="第三条",
+            created_at=same_time,
+        ),
+        ChatHistory(
+            id=2,
+            user_id="u1",
+            session_id="s1",
+            role="user",
+            content="第二条",
+            created_at=same_time,
+        ),
+    ])
+    db_session.commit()
+
+    history = routes_chat.get_chat_history(user_id="u1", session_id="s1", db=db_session)
+
+    assert [message.id for message in history] == [1, 2, 3]
+
+
+def test_session_list_has_stable_order_when_activity_timestamps_match(db_session):
+    """last_active 相同时使用 created_at 和 ID 确定稳定顺序。"""
+    same_time = datetime(2026, 7, 29, 10, 0, 0)
+    first = db_session.get(SessionModel, "s1")
+    first.created_at = same_time
+    first.last_active = same_time
+    db_session.add_all([
+        SessionModel(id="s2", user_id="u1", created_at=same_time, last_active=same_time),
+        SessionModel(id="s3", user_id="u1", created_at=same_time, last_active=same_time),
+    ])
+    db_session.commit()
+
+    sessions = routes_sessions.list_sessions(user_id="u1", db=db_session)
+
+    assert [session.id for session in sessions] == ["s3", "s2", "s1"]
 
 
 def test_other_user_cannot_start_chat_in_session(db_session):

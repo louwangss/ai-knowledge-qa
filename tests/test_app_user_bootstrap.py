@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 import asyncio
 
+import pytest
 from sqlalchemy.exc import IntegrityError
 
 
@@ -61,10 +62,42 @@ def test_fastapi_lifespan_initializes_user_before_serving(monkeypatch):
     from app import main
 
     initialized = []
-    monkeypatch.setattr(main, "initialize_app_user", lambda: initialized.append(True))
+    monkeypatch.setattr(main, "assert_schema_ready", lambda: initialized.append("schema"))
+    monkeypatch.setattr(
+        main,
+        "recover_interrupted_chat_turns",
+        lambda: initialized.append("turns"),
+    )
+    monkeypatch.setattr(main, "initialize_app_user", lambda: initialized.append("user"))
 
     async def enter_lifespan():
         async with main.lifespan(main.app):
-            assert initialized == [True]
+            assert initialized == ["schema", "turns", "user"]
 
     asyncio.run(enter_lifespan())
+    assert initialized == ["schema", "turns", "user"]
+
+
+def test_fastapi_lifespan_stops_before_user_init_when_schema_is_outdated(monkeypatch):
+    from app import main
+
+    initialized = []
+
+    def reject_schema():
+        raise RuntimeError("schema outdated")
+
+    monkeypatch.setattr(main, "assert_schema_ready", reject_schema)
+    monkeypatch.setattr(
+        main,
+        "recover_interrupted_chat_turns",
+        lambda: initialized.append("turns"),
+    )
+    monkeypatch.setattr(main, "initialize_app_user", lambda: initialized.append("user"))
+
+    async def enter_lifespan():
+        async with main.lifespan(main.app):
+            raise AssertionError("过旧 schema 不应进入服务阶段")
+
+    with pytest.raises(RuntimeError, match="schema outdated"):
+        asyncio.run(enter_lifespan())
+    assert initialized == []
