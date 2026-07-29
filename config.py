@@ -70,6 +70,7 @@ if CHAT_TURN_LEASE_SECONDS < CHAT_TURN_HEARTBEAT_SECONDS * 3:
 INDEX_JOB_POLL_SECONDS = _positive_int_env("INDEX_JOB_POLL_SECONDS", "5")
 INDEX_JOB_LEASE_SECONDS = _positive_int_env("INDEX_JOB_LEASE_SECONDS", "120")
 INDEX_JOB_BATCH_SIZE = _positive_int_env("INDEX_JOB_BATCH_SIZE", "20")
+INDEX_JOB_MAX_ATTEMPTS = _positive_int_env("INDEX_JOB_MAX_ATTEMPTS", "10")
 INDEX_JOB_RETRY_BASE_SECONDS = _positive_int_env("INDEX_JOB_RETRY_BASE_SECONDS", "30")
 INDEX_JOB_RETRY_MAX_SECONDS = _positive_int_env("INDEX_JOB_RETRY_MAX_SECONDS", "1800")
 if INDEX_JOB_RETRY_MAX_SECONDS < INDEX_JOB_RETRY_BASE_SECONDS:
@@ -114,6 +115,9 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
 SUMMARY_LLM_TIMEOUT_SECONDS = _positive_int_env("SUMMARY_LLM_TIMEOUT_SECONDS", "30")
 SUMMARY_LLM_MAX_RETRIES = _non_negative_int_env("SUMMARY_LLM_MAX_RETRIES", "0")
+# DeepSeek V4 当前为 1M context；默认仅给动态资料 10 万字符，保留问题、指令、输出和估算误差空间。
+# 字符并非精确 token，故这是可调整的保守启发式值，应结合真实 token/成本指标校准。
+LLM_CONTEXT_MAX_CHARS = _positive_int_env("LLM_CONTEXT_MAX_CHARS", "100000")
 
 # --- RAG 检索 ---
 RAG_RELEVANCE_THRESHOLD = float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0.5"))

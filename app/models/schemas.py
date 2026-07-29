@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from app.note_version import build_note_version
 
@@ -24,6 +24,8 @@ class SessionCreate(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     user_id: str
     title: str | None
@@ -31,13 +33,11 @@ class SessionResponse(BaseModel):
     created_at: datetime
     last_active: datetime
 
-    class Config:
-        from_attributes = True
-
-
 # ---- Document ----
 
 class DocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     filename: str
     file_type: str
@@ -45,10 +45,6 @@ class DocumentResponse(BaseModel):
     chunk_count: int | None
     status: str
     created_at: datetime
-
-    class Config:
-        from_attributes = True
-
 
 # ---- Chat ----
 
@@ -59,14 +55,14 @@ class ChatRequest(BaseModel):
     mode: Literal["normal", "deep"] = "normal"
     client_turn_id: UUID | None = None
 
+    _validate_message = field_validator("message")(_validate_note_content_bytes)
+
 
 class ChatSourceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     source: str
     score: float
-
-    class Config:
-        from_attributes = True
-
 
 class ChatTurnStatusResponse(BaseModel):
     client_turn_id: UUID
@@ -74,16 +70,14 @@ class ChatTurnStatusResponse(BaseModel):
 
 
 class ChatMessage(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     role: str
     content: str
     mode: str | None
     created_at: datetime
     sources: list[ChatSourceResponse] | None = None
-
-    class Config:
-        from_attributes = True
-
 
 # ---- Note ----
 
@@ -104,6 +98,8 @@ class NoteUpdate(BaseModel):
 
 
 class NoteResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     user_id: str
     concept: str | None
@@ -116,14 +112,9 @@ class NoteResponse(BaseModel):
     def version(self) -> str:
         return build_note_version(self.concept, self.content)
 
-    class Config:
-        from_attributes = True
-
-
 class NoteSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     concept: str | None
     updated_at: datetime
-
-    class Config:
-        from_attributes = True

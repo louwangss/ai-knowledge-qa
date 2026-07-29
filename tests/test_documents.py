@@ -12,7 +12,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.api import routes_documents
 from db.database import Base
-from db.models import Document, User
+from db.models import Document, IndexJob, User
+from indexing.jobs import enqueue_index_job
 
 
 @pytest.fixture
@@ -180,6 +181,45 @@ def test_duplicate_upload_leaves_no_temporary_file(db_session, tmp_path, monkeyp
         )
 
     assert exc_info.value.status_code == 409
+    assert [path.name for path in tmp_path.iterdir()] == ["existing.txt"]
+
+
+def test_duplicate_upload_retries_existing_failed_document(db_session, tmp_path, monkeypatch):
+    content = b"retry content"
+    existing_path = tmp_path / "existing.txt"
+    existing_path.write_bytes(content)
+    document = Document(
+        id="doc-failed",
+        user_id="u1",
+        filename="existing.txt",
+        file_type=".txt",
+        file_path=str(existing_path),
+        file_size=len(content),
+        chunk_size=1000,
+        chunk_overlap=200,
+        content_hash=hashlib.sha256(content).hexdigest(),
+        status="failed",
+        index_version=1,
+        indexed_version=0,
+    )
+    db_session.add(document)
+    job = enqueue_index_job(db_session, "document", document.id, "upsert", 1)
+    job.status = "exhausted"
+    job.attempt_count = 10
+    db_session.commit()
+    monkeypatch.setattr(routes_documents, "UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(routes_documents, "MAX_UPLOAD_BYTES", 1024, raising=False)
+    _patch_successful_processing(monkeypatch)
+
+    result = routes_documents.upload_document(
+        file=_upload("retry.txt", content),
+        user_id="u1",
+        db=db_session,
+    )
+
+    assert result.id == document.id
+    assert result.status == "ready"
+    assert db_session.get(IndexJob, job.id).status == "completed"
     assert [path.name for path in tmp_path.iterdir()] == ["existing.txt"]
 
 

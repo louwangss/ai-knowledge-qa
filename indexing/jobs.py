@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from config import (
     INDEX_JOB_BATCH_SIZE,
     INDEX_JOB_LEASE_SECONDS,
+    INDEX_JOB_MAX_ATTEMPTS,
     INDEX_JOB_RETRY_BASE_SECONDS,
     INDEX_JOB_RETRY_MAX_SECONDS,
 )
@@ -35,10 +36,12 @@ def enqueue_index_job(
         IndexJob.desired_version == desired_version,
     ))
     if existing is not None:
-        if existing.status == "failed":
+        if existing.status in {"failed", "exhausted"}:
             existing.status = "pending"
             existing.next_attempt_at = datetime.utcnow()
             existing.last_error_type = None
+            if existing.attempt_count >= INDEX_JOB_MAX_ATTEMPTS:
+                existing.attempt_count = 0
         return existing
 
     job = IndexJob(
@@ -140,7 +143,11 @@ def run_index_job(db: Session, job_id: int) -> bool:
         current = db.get(IndexJob, job_id)
         if current is not None and current.lease_owner == owner:
             current.attempt_count += 1
-            current.status = "failed"
+            current.status = (
+                "exhausted"
+                if current.attempt_count >= INDEX_JOB_MAX_ATTEMPTS
+                else "failed"
+            )
             current.lease_owner = None
             current.lease_expires_at = None
             current.last_error_type = type(exc).__name__[:100]

@@ -1,5 +1,4 @@
 """语义记忆：MySQL source of truth + Chroma 索引层"""
-import logging
 from datetime import datetime
 
 from sqlalchemy import select
@@ -8,11 +7,6 @@ from sqlalchemy.orm import Session
 from db.models import IndexJob, SemanticMemory
 from app.note_version import build_note_version
 from indexing.jobs import enqueue_index_job
-
-logger = logging.getLogger(__name__)
-
-_SIMILARITY_DISTANCE_THRESHOLD = 0.15  # 余弦距离 <= 此值认为重复
-
 
 class NoteVersionConflictError(Exception):
     """客户端基于过期内容尝试保存。"""
@@ -23,34 +17,6 @@ def get_semantic_vector_store():
     from rag.vector_store import get_semantic_vector_store as get_store
 
     return get_store()
-
-
-def check_similarity(db: Session, user_id: str, content: str) -> SemanticMemory | None:
-    """检查是否有相似笔记。
-
-    Returns:
-        如果找到距离 <= 阈值的笔记，返回该笔记；否则返回 None。
-    """
-    vs = get_semantic_vector_store()
-
-    # 用原始余弦距离判断（距离越小越相似）
-    results = vs.similarity_search_with_score(
-        content,
-        k=1,
-        filter={"$and": [{"user_id": user_id}, {"type": "note"}]},
-    )
-    if not results:
-        return None
-
-    doc, distance = results[0]
-    if distance <= _SIMILARITY_DISTANCE_THRESHOLD:
-        logger.info(f"相似笔记命中: distance={distance:.4f}")
-        # 通过 mysql_id 回查 MySQL（复用调用方的 session）
-        mysql_id = doc.metadata.get("mysql_id")
-        if mysql_id:
-            note = db.query(SemanticMemory).filter(SemanticMemory.id == int(mysql_id)).first()
-            return note
-    return None
 
 
 def create_note(
@@ -135,15 +101,15 @@ def delete_note(db: Session, note_id: int, user_id: str) -> bool:
     return True
 
 
-def get_notes(db: Session, user_id: str) -> list[SemanticMemory]:
+def get_notes(db: Session, user_id: str, limit: int = 100, offset: int = 0) -> list[SemanticMemory]:
     """获取用户所有笔记"""
     return db.query(SemanticMemory).filter(
         SemanticMemory.user_id == user_id,
         SemanticMemory.index_state != "deleting",
-    ).order_by(SemanticMemory.created_at.desc()).all()
+    ).order_by(SemanticMemory.created_at.desc()).offset(offset).limit(limit).all()
 
 
-def get_note_summaries(db: Session, user_id: str):
+def get_note_summaries(db: Session, user_id: str, limit: int = 100, offset: int = 0):
     """只读取列表展示所需字段，避免传输全部笔记正文。"""
     return db.query(
         SemanticMemory.id,
@@ -152,7 +118,7 @@ def get_note_summaries(db: Session, user_id: str):
     ).filter(
         SemanticMemory.user_id == user_id,
         SemanticMemory.index_state != "deleting",
-    ).order_by(SemanticMemory.created_at.desc()).all()
+    ).order_by(SemanticMemory.created_at.desc()).offset(offset).limit(limit).all()
 
 
 def get_note(db: Session, note_id: int, user_id: str) -> SemanticMemory | None:
@@ -247,10 +213,3 @@ def sync_note_index_task(note_id: int, user_id: str) -> None:
             run_index_job(db, job_id)
     finally:
         db.close()
-
-
-def compensation_task(db: Session):
-    """兼容旧调用方；实际补偿统一由持久化任务扫描器完成。"""
-    from indexing.jobs import process_pending_index_jobs
-
-    return process_pending_index_jobs()

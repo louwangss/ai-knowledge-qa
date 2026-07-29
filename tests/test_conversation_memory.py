@@ -185,6 +185,16 @@ def test_failed_summary_generation_keeps_existing_progress(db_session):
     assert db_session.query(SessionSummary).count() == 0
 
 
+def test_failed_or_missing_summary_still_bounds_prompt_history(db_session):
+    _add_rounds(db_session, 20)
+
+    memory = load_conversation_memory(db_session, "u1", "s1")
+
+    assert len(memory["messages"]) == 20
+    assert memory["messages"][0]["content"] == "问题 11"
+    assert memory["messages"][-1]["content"] == "回答 20"
+
+
 def test_late_compression_cannot_overwrite_newer_summary(db_session):
     _add_rounds(db_session, 16)
     db_session.add(SessionSummary(

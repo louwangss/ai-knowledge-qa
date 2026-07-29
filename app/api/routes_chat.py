@@ -9,6 +9,7 @@ import uuid
 from contextlib import suppress
 from numbers import Real
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -28,11 +29,13 @@ from config import (
     CHAT_STAGE_TIMEOUT_SECONDS,
     CHAT_TURN_HEARTBEAT_SECONDS,
     CHAT_TURN_LEASE_SECONDS,
+    LLM_CONTEXT_MAX_CHARS,
 )
 from memory.conversation import maybe_compress_conversation
 from memory.episodic import record_event
 from memory.retrieve import retrieve_context
 from rag.llm import get_llm
+from rag.context_budget import bound_context_sections
 from tools.web_research import plan_web_search, search_web
 
 logger = logging.getLogger(__name__)
@@ -805,13 +808,21 @@ async def _stream_normal(payload: ChatRequest, context: dict):
             for item in web_results
         )
 
+    bounded = bound_context_sections([
+        ("documents", _format_docs(context.get("documents", []))),
+        ("notes", _format_notes(context.get("notes", []))),
+        ("short_term", _format_short_term(context.get("short_term_memory", {}))),
+        ("episodic", _format_episodic(context.get("episodic_memory", []))),
+        ("web_results", web_context),
+    ], max_chars=LLM_CONTEXT_MAX_CHARS)
+
     prompt = NORMAL_PROMPT.format(
         current_date=current_date,
-        documents=_format_docs(context.get("documents", [])),
-        notes=_format_notes(context.get("notes", [])),
-        episodic=_format_episodic(context.get("episodic_memory", [])),
-        web_results=web_context,
-        short_term=_format_short_term(context.get("short_term_memory", {})),
+        documents=bounded["documents"],
+        notes=bounded["notes"],
+        episodic=bounded["episodic"],
+        web_results=bounded["web_results"],
+        short_term=bounded["short_term"],
         question=payload.message,
     )
 
@@ -925,6 +936,8 @@ def get_chat_turn_status(
 def get_chat_history(
     user_id: str = Query(...),
     session_id: str = Query(...),
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     db: Session = Depends(get_db),
 ):
     require_app_user(user_id)
@@ -935,9 +948,12 @@ def get_chat_history(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    return db.query(ChatHistory).options(
+    rows = db.query(ChatHistory).options(
         selectinload(ChatHistory.sources),
     ).filter(
         ChatHistory.user_id == user_id,
         ChatHistory.session_id == session_id,
-    ).order_by(ChatHistory.created_at.asc(), ChatHistory.id.asc()).all()
+    ).order_by(
+        ChatHistory.created_at.desc(), ChatHistory.id.desc()
+    ).offset(offset).limit(limit).all()
+    return list(reversed(rows))

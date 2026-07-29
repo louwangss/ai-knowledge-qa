@@ -2,6 +2,7 @@
 import logging
 import uuid
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -42,7 +43,12 @@ def create_session(payload: SessionCreate, db: Session = Depends(get_db)):
 
 
 @router.get("", response_model=list[SessionResponse])
-def list_sessions(user_id: str = Query(...), db: Session = Depends(get_db)):
+def list_sessions(
+    user_id: str = Query(...),
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    db: Session = Depends(get_db),
+):
     """获取用户所有会话，按 last_active 降序"""
     require_app_user(user_id)
     return db.query(SessionModel).filter(
@@ -52,7 +58,7 @@ def list_sessions(user_id: str = Query(...), db: Session = Depends(get_db)):
         SessionModel.last_active.desc(),
         SessionModel.created_at.desc(),
         SessionModel.id.desc(),
-    ).all()
+    ).offset(offset).limit(limit).all()
 
 
 @router.delete("/{session_id}")

@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 from db.database import Base
 from db.schema import assert_schema_ready, downgrade_schema, upgrade_schema
+from db.schema import SchemaNotReadyError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,5 +69,23 @@ def test_baseline_migration_can_downgrade_to_empty_database():
         downgrade_schema(engine, "base")
 
         assert set(inspect(engine).get_table_names()) <= {"alembic_version"}
+    finally:
+        engine.dispose()
+
+
+def test_partial_current_schema_is_not_stamped_as_head():
+    engine = _memory_engine()
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(text("DROP INDEX idx_index_job_available"))
+
+        try:
+            upgrade_schema(engine)
+            assert False, "部分新结构必须拒绝接管"
+        except SchemaNotReadyError:
+            pass
+
+        assert "alembic_version" not in inspect(engine).get_table_names()
     finally:
         engine.dispose()

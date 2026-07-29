@@ -12,6 +12,8 @@ def test_ci_runs_without_repository_secrets():
     assert "actions/setup-python@v6" in workflow
     assert "python -m pip check" in workflow
     assert "python -m pytest -q" in workflow
+    assert "python -m db.init_db --upgrade" in workflow
+    assert "mysql:8.4" in workflow
     assert "permissions:\n  contents: read" in workflow
     assert "${{ secrets." not in workflow
 
@@ -19,8 +21,11 @@ def test_ci_runs_without_repository_secrets():
 def test_requirements_declares_direct_langchain_integrations():
     requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
 
-    for package in ("langchain-chroma", "langchain-huggingface", "langchain-classic"):
+    for package in ("langchain-core", "langchain-chroma", "langchain-huggingface"):
         assert package in requirements
+
+    for retired in ("langchain-classic", "sse-starlette", "beautifulsoup4", "numexpr"):
+        assert retired not in requirements.lower()
 
 
 def test_private_context_is_not_exposed_to_tool_calling_agent():
@@ -31,6 +36,25 @@ def test_private_context_is_not_exposed_to_tool_calling_agent():
     assert not (PROJECT_ROOT / "tools" / "web_search.py").exists()
     assert "plan_web_search" in chat_route
     assert "payload.message, current_date" in chat_route
+
+
+def test_collection_endpoints_expose_bounded_pagination():
+    from app.main import app
+
+    paths = app.openapi()["paths"]
+    for path, method in (
+        ("/api/v1/sessions", "get"),
+        ("/api/v1/documents", "get"),
+        ("/api/v1/notes", "get"),
+        ("/api/v1/notes/summaries", "get"),
+        ("/api/v1/chat/history", "get"),
+    ):
+        parameters = {
+            item["name"]: item for item in paths[path][method]["parameters"]
+        }
+        assert parameters["limit"]["schema"]["maximum"] == 100
+        assert parameters["limit"]["schema"]["default"] == 100
+        assert parameters["offset"]["schema"]["minimum"] == 0
 
 
 def test_gradio_runtime_is_fully_retired():

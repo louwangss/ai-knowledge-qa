@@ -13,6 +13,7 @@ env:
   MYSQL_USER: ci_user
   MYSQL_PASSWORD: ci-placeholder-password
   MYSQL_DATABASE: ci_test_db
+  MYSQL_HOST: 127.0.0.1
   REDIS_PASSWORD: ""
   APP_ACCESS_TOKEN: ci-placeholder-access-token
   APP_USER_ID: ci-user
@@ -21,6 +22,21 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-placeholder-password
+          MYSQL_DATABASE: ci_test_db
+          MYSQL_USER: ci_user
+          MYSQL_PASSWORD: ci-placeholder-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -pci-placeholder-password"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
 
     steps:
       - name: Checkout repository
@@ -43,6 +59,11 @@ jobs:
 
       - name: Compile source files
         run: python -m compileall -q app agents db evaluation memory rag tools
+
+      - name: Verify MySQL migrations reach Alembic head
+        run: |
+          python -m db.init_db --upgrade
+          alembic current
 
       - name: Run tests
         run: python -m pytest -q

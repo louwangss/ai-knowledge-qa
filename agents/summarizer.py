@@ -2,7 +2,8 @@
 import logging
 
 from agents.state import ResearchState
-from config import CHAT_STAGE_TIMEOUT_SECONDS
+from config import CHAT_STAGE_TIMEOUT_SECONDS, LLM_CONTEXT_MAX_CHARS
+from rag.context_budget import bound_context_sections
 from rag.llm import get_llm
 
 logger = logging.getLogger(__name__)
@@ -72,19 +73,26 @@ def _build_prompt(state: ResearchState) -> str:
     else:
         stm_text = stm if stm else "无"
 
+    bounded = bound_context_sections([
+        ("documents", _format_docs(docs)),
+        ("notes", _format_notes(notes)),
+        ("short_term", stm_text),
+        ("episodic", _format_episodic(episodic)),
+    ], max_chars=LLM_CONTEXT_MAX_CHARS)
+
     prompt = f"""你是一个知识库研究助手。请基于以下检索到的资料，对用户的问题进行结构化的深度分析。
 
 # 检索到的文档资料
-{_format_docs(docs)}
+{bounded['documents']}
 
 # 用户笔记
-{_format_notes(notes)}
+{bounded['notes']}
 
 # 学习历程
-{_format_episodic(episodic)}
+{bounded['episodic']}
 
 # 对话上下文
-{stm_text}
+{bounded['short_term']}
 
 # 用户的问题
 {question}

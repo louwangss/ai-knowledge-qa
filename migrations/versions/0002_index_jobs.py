@@ -34,12 +34,13 @@ def upgrade() -> None:
         sa.Column("created_at", sa.TIMESTAMP(), nullable=True),
         sa.Column("updated_at", sa.TIMESTAMP(), nullable=True),
         sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index(
-        "uq_index_job_target_version",
-        "index_jobs",
-        ["entity_type", "entity_id", "operation", "desired_version"],
-        unique=True,
+        sa.UniqueConstraint(
+            "entity_type",
+            "entity_id",
+            "operation",
+            "desired_version",
+            name="uq_index_job_target_version",
+        ),
     )
     op.create_index(
         "idx_index_job_available",

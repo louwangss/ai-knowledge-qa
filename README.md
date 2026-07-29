@@ -32,7 +32,7 @@ flowchart LR
     A --> RE[("Redis Web 登录会话与限流")]
     R --> L["DeepSeek 兼容 LLM"]
     S --> L
-    A -. "可选" .-> T["Tavily / Calculator"]
+    A -. "仅公开问题规划，可选" .-> T["Tavily 结构化搜索"]
 ```
 
 ### Chat 状态流
@@ -54,7 +54,7 @@ Bearer / HttpOnly 会话认证与资源归属校验
 
 ### 文档生命周期
 
-上传按块读取并增量计算 SHA-256，超过 `MAX_UPLOAD_BYTES` 时在解析和 embedding 前返回 413。临时文件通过原子改名进入正式目录；解析、向量化或重复校验失败不会留下新数据库记录。删除时先处理 Chroma 派生索引，失败则保留 MySQL 权威记录与源文件以便重试。
+上传按块读取并增量计算 SHA-256，超过 `MAX_UPLOAD_BYTES` 时在解析和 embedding 前返回 413。临时文件通过原子改名进入正式目录；MySQL 会在同一事务保存权威记录和持久化索引任务。解析、向量化或删除失败时，任务按带抖动的指数退避重试；失败记录在文档列表中可见，删除中的记录立即从列表和检索中隐藏。Chroma 使用稳定向量 ID 与索引版本，检索结果还会回查 MySQL，只接受当前 `ready` 版本。
 
 ## 技术栈
 
@@ -105,12 +105,14 @@ cp .env.example .env
 | `APP_ACCESS_TOKEN` | 是 | 服务端 API 的 Bearer token，也可在本机手动换取 Web 会话；应使用足够长的随机值 |
 | `APP_USER_ID` | 是 | 服务端允许访问的固定单用户 ID |
 | `REDIS_*` | 否 | Redis 连接配置，密码可留空；当前用于 Web 登录会话、登录限流及定向清理升级前遗留 key，不保存权威对话记忆 |
-| `TAVILY_API_KEY` | 否 | 非空时允许 normal Agent 使用联网搜索 |
+| `TAVILY_API_KEY` | 否 | 非空时允许隔离规划器只根据当前公开问题决定是否联网；最终回答模型没有工具权限 |
 | `API_HOST` | 否 | FastAPI 监听地址，默认 `127.0.0.1` |
 | `MAX_UPLOAD_BYTES` | 否 | 默认 25 MiB，是当前单机演示的可调整启发式值 |
 | `CHAT_TURN_LEASE_SECONDS` / `CHAT_TURN_HEARTBEAT_SECONDS` | 否 | 默认 90 / 30 秒；租约至少覆盖 3 个心跳周期，用于多 worker 的过期接管与 fencing |
 | `CHAT_STAGE_TIMEOUT_SECONDS` | 否 | 默认 30 秒；检索时是阶段总超时，direct/Agent/deep 流式生成时是相邻对外进度事件的空闲超时 |
 | `SUMMARY_LLM_TIMEOUT_SECONDS` / `SUMMARY_LLM_MAX_RETRIES` | 否 | 内部摘要默认 30 秒超时、0 次自动重试；不改变普通问答模型调用参数 |
+| `INDEX_JOB_*` | 否 | 持久化索引任务的轮询、租约、批量和退避参数；默认值是单机启发式起点，应按耗时、失败率和积压调整 |
+| `LLM_CONTEXT_MAX_CHARS` | 否 | 动态资料统一字符预算，默认 100000；DeepSeek V4 当前为 1M context，但字符并非精确 token，应结合真实成本与 token 指标校准 |
 
 可用以下命令生成 token：
 
@@ -127,7 +129,7 @@ python -m db.init_db
 .\start.bat
 ```
 
-升级已有数据库时，先停止服务并执行 `python -m db.init_db --upgrade`。该命令只添加当前版本缺失的表、列、索引和外键并保留权威业务数据；若异常旧库里已有不属于任何用户或会话的孤儿 ChatTurn reservation，会先清除这类不可恢复的派生状态。应用启动时会校验 schema 版本及上述必需结构，结构过旧时会拒绝启动并给出升级命令。`--drop` 仍仅用于明确需要清空全部数据的重建场景。
+升级已有数据库时，先停止服务并执行 `python -m db.init_db --upgrade`。新库由 Alembic 直接升级到 head；未版本化旧库会先通过原有结构补齐和完整性门禁，校验成功后才接管并继续版本迁移，不能把残缺库直接标记为最新。应用启动时会校验业务结构与 Alembic revision，结构过旧时拒绝启动并给出升级命令。`--drop` 仍仅用于明确需要清空全部数据的重建场景。
 
 `start.bat` 会优先使用项目的 `venv`，并行拉起 FastAPI 和 React Web 工作区，等待服务健康检查通过后自动打开 `http://127.0.0.1:5173/app/`。启动器使用一次性凭证换取 HttpOnly Cookie，长期 `APP_ACCESS_TOKEN` 不会打包进浏览器。按 `Ctrl+C` 会一起关闭两个服务；若端口已被旧进程占用会明确报错。跨平台环境可以直接运行同一启动器：
 
@@ -249,6 +251,6 @@ evaluation/   公开数据集、无密钥评测 CLI 和实际结果
 memory/       短期、情景和语义记忆
 rag/          Loader、Splitter、Chroma、Retriever 与 LLM 封装
 tests/        自动化测试
-tools/        Web Search 与 Calculator 工具
+tools/        隔离的联网规划与 Tavily 结构化搜索
 web/          React 问答、笔记与文档工作区、组件测试和 Edge E2E
 ```

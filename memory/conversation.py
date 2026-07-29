@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 INITIAL_COMPRESS_ROUND = 11
 COMPRESS_INTERVAL = 5
 MESSAGES_PER_COMPRESSION = 10
+# 两个压缩批次覆盖正常 5 轮间隔前后的完整上下文，同时在摘要失败时保持硬上限。
+CONTEXT_MESSAGE_LIMIT = MESSAGES_PER_COMPRESSION * 2
 
 
 def _summary_record(
@@ -113,11 +115,15 @@ def load_conversation_memory(db: Session, user_id: str, session_id: str) -> dict
     else:
         summary = summary_record.summary if summary_record else None
 
+    # 摘要服务失败时也不能把全量历史送入 prompt；始终只读取最近一个压缩批次。
+    uncompressed_count = max(0, total_messages - compressed_count)
+    bounded_offset = compressed_count + max(0, uncompressed_count - CONTEXT_MESSAGE_LIMIT)
     rows = _ordered_messages(
         db,
         user_id,
         session_id,
-        offset=compressed_count,
+        offset=bounded_offset,
+        limit=CONTEXT_MESSAGE_LIMIT,
     )
     return {
         "summary": summary,

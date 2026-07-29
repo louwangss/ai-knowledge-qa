@@ -3,6 +3,7 @@ import hashlib
 import logging
 import uuid
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.exc import IntegrityError
@@ -152,6 +153,23 @@ def upload_document(
             Document.content_hash == content_hash,
         ).first()
         if existing:
+            if existing.status == "failed":
+                temp_path.unlink(missing_ok=True)
+                existing.status = "indexing"
+                retry_job = enqueue_index_job(
+                    db,
+                    "document",
+                    existing.id,
+                    "upsert",
+                    existing.index_version,
+                )
+                db.commit()
+                if not run_index_job(db, retry_job.id):
+                    raise HTTPException(
+                        status_code=503,
+                        detail="文档索引仍未恢复，后台将按策略继续重试",
+                    )
+                return db.get(Document, existing.id)
             raise HTTPException(status_code=409, detail=f"文档已存在: {existing.filename}")
         temp_path.replace(file_path)
     except Exception:
@@ -197,13 +215,15 @@ def upload_document(
 @router.get("", response_model=list[DocumentResponse])
 def list_documents(
     user_id: str = Query(...),
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     db: Session = Depends(get_db),
 ):
     require_app_user(user_id)
     return db.query(Document).filter(
         Document.user_id == user_id,
         Document.status != "deleting",
-    ).order_by(Document.created_at.desc()).all()
+    ).order_by(Document.created_at.desc()).offset(offset).limit(limit).all()
 
 
 @router.delete("/{document_id}", status_code=202)

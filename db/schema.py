@@ -47,6 +47,28 @@ INDEX_SQL = [statement for _, _, statement in INDEX_DEFINITIONS]
 REQUIRED_COLUMNS = {
     "chat_turns": {"lease_owner", "lease_expires_at"},
 }
+CURRENT_REQUIRED_COLUMNS = {
+    "documents": {"index_version", "indexed_version"},
+    "semantic_memory": {"index_version", "indexed_version", "index_state"},
+    "index_jobs": {
+        "entity_type",
+        "entity_id",
+        "operation",
+        "desired_version",
+        "status",
+        "lease_owner",
+        "lease_expires_at",
+        "attempt_count",
+        "next_attempt_at",
+        "last_error_type",
+    },
+}
+CURRENT_REQUIRED_INDEXES = {
+    "index_jobs": {"idx_index_job_available"},
+}
+CURRENT_REQUIRED_UNIQUE_CONSTRAINTS = {
+    "index_jobs": {"uq_index_job_target_version"},
+}
 
 CHAT_TURN_FOREIGN_KEY_DEFINITIONS = (
     (
@@ -315,6 +337,39 @@ def _run_alembic(bind, action, revision: str) -> None:
         action(_alembic_config(connection), revision)
 
 
+def _assert_current_schema_structure(bind) -> None:
+    inspector = inspect(bind)
+    table_names = set(inspector.get_table_names())
+    missing_current_tables = sorted(set(Base.metadata.tables) - table_names)
+    if missing_current_tables:
+        raise _upgrade_instruction(f"缺少表：{', '.join(missing_current_tables)}")
+    missing_current_columns = []
+    for table_name, required in CURRENT_REQUIRED_COLUMNS.items():
+        existing = {item["name"] for item in inspector.get_columns(table_name)}
+        missing_current_columns.extend(
+            f"{table_name}.{column_name}"
+            for column_name in sorted(required - existing)
+        )
+    if missing_current_columns:
+        raise _upgrade_instruction(f"缺少列：{', '.join(missing_current_columns)}")
+    missing_current_indexes = []
+    for table_name, required in CURRENT_REQUIRED_INDEXES.items():
+        existing = {item["name"] for item in inspector.get_indexes(table_name)}
+        missing_current_indexes.extend(sorted(required - existing))
+    if missing_current_indexes:
+        raise _upgrade_instruction(f"缺少索引：{', '.join(missing_current_indexes)}")
+    missing_unique_constraints = []
+    for table_name, required in CURRENT_REQUIRED_UNIQUE_CONSTRAINTS.items():
+        existing = {
+            item["name"] for item in inspector.get_unique_constraints(table_name)
+        }
+        missing_unique_constraints.extend(sorted(required - existing))
+    if missing_unique_constraints:
+        raise _upgrade_instruction(
+            f"缺少唯一约束：{', '.join(missing_unique_constraints)}"
+        )
+
+
 def upgrade_schema(bind=engine) -> None:
     """升级到 Alembic head；未版本化旧库先经旧门禁验证后再接管。"""
     table_names = set(inspect(bind).get_table_names())
@@ -326,17 +381,21 @@ def upgrade_schema(bind=engine) -> None:
         _upgrade_legacy_schema(bind)
         _assert_legacy_schema_ready(bind)
         refreshed_tables = set(inspect(bind).get_table_names())
-        current_columns_present = (
+        has_current_artifacts = (
             "index_jobs" in refreshed_tables
-            and {"index_version", "indexed_version"}
-            <= {item["name"] for item in inspect(bind).get_columns("documents")}
-            and {"index_version", "indexed_version", "index_state"}
-            <= {item["name"] for item in inspect(bind).get_columns("semantic_memory")}
+            or "index_version" in {
+                item["name"] for item in inspect(bind).get_columns("documents")
+            }
+            or "index_state" in {
+                item["name"] for item in inspect(bind).get_columns("semantic_memory")
+            }
         )
+        if has_current_artifacts:
+            _assert_current_schema_structure(bind)
         _run_alembic(
             bind,
             command.stamp,
-            "head" if current_columns_present else "0001_current_schema",
+            "head" if has_current_artifacts else "0001_current_schema",
         )
 
     _run_alembic(bind, command.upgrade, "head")
@@ -351,10 +410,7 @@ def downgrade_schema(bind=engine, revision: str = "-1") -> None:
 def assert_schema_ready(bind=engine) -> None:
     """验证业务结构完整且 Alembic revision 与代码 head 一致。"""
     _assert_legacy_schema_ready(bind)
-    table_names = set(inspect(bind).get_table_names())
-    missing_current_tables = sorted(set(Base.metadata.tables) - table_names)
-    if missing_current_tables:
-        raise _upgrade_instruction(f"缺少表：{', '.join(missing_current_tables)}")
+    _assert_current_schema_structure(bind)
     current = _current_alembic_revision(bind)
     head = _alembic_head()
     if current != head:

@@ -1,4 +1,6 @@
 """笔记路由：CRUD"""
+from typing import Annotated
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -37,15 +39,25 @@ def create_note_endpoint(
 
 
 @router.get("", response_model=list[NoteResponse])
-def list_notes(user_id: str = Query(...), db: Session = Depends(get_db)):
+def list_notes(
+    user_id: str = Query(...),
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    db: Session = Depends(get_db),
+):
     require_app_user(user_id)
-    return get_notes(db, user_id)
+    return get_notes(db, user_id, limit=limit, offset=offset)
 
 
 @router.get("/summaries", response_model=list[NoteSummary])
-def list_note_summaries(user_id: str = Query(...), db: Session = Depends(get_db)):
+def list_note_summaries(
+    user_id: str = Query(...),
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    db: Session = Depends(get_db),
+):
     require_app_user(user_id)
-    return get_note_summaries(db, user_id)
+    return get_note_summaries(db, user_id, limit=limit, offset=offset)
 
 
 @router.get("/{note_id}", response_model=NoteResponse)

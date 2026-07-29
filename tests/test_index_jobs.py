@@ -88,3 +88,20 @@ def test_failed_job_keeps_source_and_schedules_retry(db_session, monkeypatch):
     assert persisted_job.attempt_count == 1
     assert persisted_job.next_attempt_at > datetime.utcnow()
     assert persisted_job.last_error_type == "RuntimeError"
+
+
+def test_job_stops_after_configured_attempt_limit(db_session, monkeypatch):
+    document = _document()
+    db_session.add(document)
+    job = enqueue_index_job(db_session, "document", document.id, "upsert", 1)
+    db_session.commit()
+    monkeypatch.setattr("indexing.jobs.INDEX_JOB_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        "app.api.routes_documents.process_document_index_job",
+        lambda db, claimed_job: (_ for _ in ()).throw(RuntimeError("permanent")),
+    )
+
+    assert run_index_job(db_session, job.id) is False
+
+    db_session.expire_all()
+    assert db_session.get(IndexJob, job.id).status == "exhausted"
