@@ -257,6 +257,8 @@ python -m compileall -q app agents db evaluation indexing memory migrations rag 
 python evaluation/run_eval.py --top-k 2 --output evaluation/results/local.json
 ```
 
+离线评测使用 `deterministic-char-bigram-v1` 确定性字符 bigram 检索器，仅验证公开小样本、指标实现和 CI 可复现性，不替代线上 BGE 向量检索，也不代表生产数据分布。
+
 前端：
 
 ```powershell
@@ -326,7 +328,7 @@ web/          React 工作区、组件测试和浏览器 E2E 脚本
 
 ## 当前边界
 
-- 当前采用固定 `APP_USER_ID`，没有注册、密码、角色、刷新 token 或完整多租户隔离。
+- 当前采用固定 `APP_USER_ID`，没有注册、密码、角色、刷新 token 或完整多租户认证与隔离。
 - Chroma 的用户隔离依赖 metadata filter，不是物理分库；MySQL 回查负责最终权威校验。
 - Redis 不可用时 React Web 登录会失败，但 MySQL 中的会话、消息和摘要不会丢失。
 - 尚未实现恶意文件扫描、内容沙箱、生产级指标后端、告警、自动备份恢复演练和容量验证。
