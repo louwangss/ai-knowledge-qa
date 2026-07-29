@@ -44,10 +44,24 @@ export function Editor({
 }: EditorProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
+  const restoreDeleteFocusRef = useRef(false);
 
   useEffect(() => {
-    if (confirmingDelete) cancelRef.current?.focus();
+    if (confirmingDelete) {
+      cancelRef.current?.focus();
+      return;
+    }
+    if (restoreDeleteFocusRef.current) {
+      restoreDeleteFocusRef.current = false;
+      deleteTriggerRef.current?.focus({ preventScroll: true });
+    }
   }, [confirmingDelete]);
+
+  function closeDeleteDialog() {
+    restoreDeleteFocusRef.current = true;
+    setConfirmingDelete(false);
+  }
 
   if (isLoading) {
     return (
@@ -77,7 +91,7 @@ export function Editor({
           <span />
           {stateCopy[saveState]}
         </div>
-        <button className="icon-button delete-button" onClick={() => setConfirmingDelete(true)} aria-label="删除当前笔记">
+        <button ref={deleteTriggerRef} className="icon-button delete-button" onClick={() => setConfirmingDelete(true)} aria-label="删除当前笔记">
           <TrashIcon />
         </button>
       </header>
@@ -124,14 +138,18 @@ export function Editor({
       </article>
 
       {confirmingDelete && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setConfirmingDelete(false)}>
+        <div className="dialog-backdrop" role="presentation" onMouseDown={closeDeleteDialog}>
           <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="dialog-icon"><TrashIcon /></div>
             <h2 id="delete-title">删除这篇笔记？</h2>
             <p>删除后无法从应用内恢复，原笔记会立即从列表移除。</p>
             <div className="dialog-actions">
-              <button ref={cancelRef} onClick={() => setConfirmingDelete(false)}>取消</button>
-              <button className="danger-action" onClick={() => { setConfirmingDelete(false); onDelete(); }}>确认删除</button>
+              <button ref={cancelRef} onClick={closeDeleteDialog}>取消</button>
+              <button className="danger-action" onClick={() => {
+                restoreDeleteFocusRef.current = false;
+                setConfirmingDelete(false);
+                onDelete();
+              }}>确认删除</button>
             </div>
           </section>
         </div>

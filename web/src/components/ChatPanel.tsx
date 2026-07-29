@@ -65,7 +65,12 @@ export function ChatPanel({
   const [mode, setMode] = useState<ChatMode>("normal");
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const restoreDeleteFocusRef = useRef(false);
+  const wasStreamingRef = useRef(isStreaming);
 
   useEffect(() => {
     const element = endRef.current;
@@ -73,8 +78,34 @@ export function ChatPanel({
   }, [messages]);
 
   useEffect(() => {
-    if (deleteTargetId) cancelRef.current?.focus();
+    if (deleteTargetId) {
+      cancelRef.current?.focus();
+      return;
+    }
+    if (restoreDeleteFocusRef.current) {
+      restoreDeleteFocusRef.current = false;
+      deleteTriggerRef.current?.focus({ preventScroll: true });
+    }
   }, [deleteTargetId]);
+
+  useEffect(() => {
+    const answerFinished = wasStreamingRef.current && !isStreaming;
+    wasStreamingRef.current = isStreaming;
+    if (!answerFinished || isLoading || canRetryHistory || deleteTargetId) return;
+
+    const activeElement = document.activeElement;
+    const focusIsUnclaimed = !activeElement
+      || activeElement === document.body
+      || activeElement === document.documentElement;
+    if (focusIsUnclaimed || composerRef.current?.contains(activeElement)) {
+      composerInputRef.current?.focus({ preventScroll: true });
+    }
+  }, [canRetryHistory, deleteTargetId, isLoading, isStreaming]);
+
+  function closeDeleteDialog() {
+    restoreDeleteFocusRef.current = true;
+    setDeleteTargetId(null);
+  }
 
   function submit() {
     const content = draft.trim();
@@ -94,7 +125,7 @@ export function ChatPanel({
           <button aria-pressed={mode === "deep"} onClick={() => setMode("deep")}><SparkIcon />深度研究</button>
         </div>
         {hasSession && (
-          <button className="icon-button delete-button" onClick={() => setDeleteTargetId(sessionId)} disabled={isStreaming || isDeleting} aria-label="删除当前会话">
+          <button ref={deleteTriggerRef} className="icon-button delete-button" onClick={() => setDeleteTargetId(sessionId)} disabled={isStreaming || isDeleting} aria-label="删除当前会话">
             <TrashIcon />
           </button>
         )}
@@ -127,8 +158,9 @@ export function ChatPanel({
       </section>
 
       <footer className="composer-wrap">
-        <div className="composer">
+        <div ref={composerRef} className="composer">
           <textarea
+            ref={composerInputRef}
             aria-label="输入问题"
             value={draft}
             rows={1}
@@ -152,14 +184,19 @@ export function ChatPanel({
       </footer>
 
       {deleteTargetId && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setDeleteTargetId(null)}>
+        <div className="dialog-backdrop" role="presentation" onMouseDown={closeDeleteDialog}>
           <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-session-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="dialog-icon"><TrashIcon /></div>
             <h2 id="delete-session-title">删除这个会话？</h2>
             <p>该会话中的消息、摘要和短期记忆都会被删除，操作无法恢复。</p>
             <div className="dialog-actions">
-              <button ref={cancelRef} onClick={() => setDeleteTargetId(null)}>取消</button>
-              <button className="danger-action" disabled={isDeleting} onClick={() => void onDelete(deleteTargetId).then((deleted) => { if (deleted) setDeleteTargetId(null); })}>
+              <button ref={cancelRef} onClick={closeDeleteDialog}>取消</button>
+              <button className="danger-action" disabled={isDeleting} onClick={() => void onDelete(deleteTargetId).then((deleted) => {
+                if (deleted) {
+                  restoreDeleteFocusRef.current = false;
+                  setDeleteTargetId(null);
+                }
+              })}>
                 {isDeleting ? "正在删除…" : "确认删除"}
               </button>
             </div>

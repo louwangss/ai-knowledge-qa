@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { KnowledgeDocument } from "../types";
 import { DocumentIcon, MenuIcon, TrashIcon, UploadIcon } from "./Icons";
@@ -38,8 +38,27 @@ export function DocumentsPanel({
   onOpenSidebar,
 }: DocumentsPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const restoreDeleteFocusRef = useRef(false);
   const [dragging, setDragging] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<KnowledgeDocument | null>(null);
+
+  useEffect(() => {
+    if (deleteTarget) {
+      cancelRef.current?.focus();
+      return;
+    }
+    if (restoreDeleteFocusRef.current) {
+      restoreDeleteFocusRef.current = false;
+      deleteTriggerRef.current?.focus({ preventScroll: true });
+    }
+  }, [deleteTarget]);
+
+  function closeDeleteDialog() {
+    restoreDeleteFocusRef.current = true;
+    setDeleteTarget(null);
+  }
 
   async function selectFile(file?: File) {
     if (!file || isLoading || isUploading) return;
@@ -113,7 +132,10 @@ export function DocumentsPanel({
                   {document.status === "processing" ? (
                     <span className="document-progress" aria-label="正在处理" />
                   ) : (
-                    <button className="icon-button delete-button" aria-label={`删除 ${document.filename}`} onClick={() => setDeleteTarget(document)}><TrashIcon /></button>
+                    <button className="icon-button delete-button" aria-label={`删除 ${document.filename}`} onClick={(event) => {
+                      deleteTriggerRef.current = event.currentTarget;
+                      setDeleteTarget(document);
+                    }}><TrashIcon /></button>
                   )}
                 </li>
               ))}
@@ -123,14 +145,20 @@ export function DocumentsPanel({
       </div>
 
       {deleteTarget && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteTarget(null); }}>
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDeleteDialog(); }}>
           <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-document-title">
             <div className="dialog-icon"><TrashIcon /></div>
             <h2 id="delete-document-title">删除这份文档？</h2>
             <p>“{deleteTarget.filename}”的源文件和检索索引都会被移除，此操作无法撤销。</p>
             <div className="dialog-actions">
-              <button onClick={() => setDeleteTarget(null)}>取消</button>
-              <button className="danger-action" onClick={() => { const id = deleteTarget.id; setDeleteTarget(null); void onDelete(id); }}>确认删除</button>
+              <button ref={cancelRef} onClick={closeDeleteDialog}>取消</button>
+              <button className="danger-action" onClick={() => {
+                const id = deleteTarget.id;
+                restoreDeleteFocusRef.current = false;
+                deleteTriggerRef.current = null;
+                setDeleteTarget(null);
+                void onDelete(id);
+              }}>确认删除</button>
             </div>
           </section>
         </div>
